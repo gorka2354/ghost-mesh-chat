@@ -220,19 +220,31 @@ function showChat() {
 let peerRetries = 0;
 const MAX_PEER_RETRIES = 3;
 
+// Конфигурация PeerJS с явными параметрами
+const PEER_CONFIG = {
+  secure: true,
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  }
+};
+
 function initPeer(peerId, onOpen) {
-  peer = new Peer(peerId);
+  peer = new Peer(peerId, PEER_CONFIG);
 
   // Таймаут подключения к signaling-серверу (10 сек)
   const connectTimeout = setTimeout(() => {
-    if (!peer.open) {
-      setStatus('signaling не отвечает, повтор...');
+    if (!peer.open && !peer.destroyed) {
       if (peerRetries < MAX_PEER_RETRIES) {
         peerRetries++;
+        setStatus('signaling не отвечает, повтор ' + peerRetries + '/' + MAX_PEER_RETRIES);
         peer.destroy();
         initPeer(peerId, onOpen);
       } else {
-        setStatus('не удалось подключиться к signaling');
+        setStatus('signaling недоступен');
         addSystemMessage('PeerJS Cloud недоступен. Попробуй обновить страницу.');
       }
     }
@@ -269,13 +281,16 @@ function initPeer(peerId, onOpen) {
       return;
     }
     setStatus('ошибка: ' + err.type);
-    addSystemMessage('PeerJS ошибка: ' + err.type + ' — ' + err.message);
   });
 
   peer.on('disconnected', () => {
-    setStatus('отключён от signaling, переподключение...');
-    // Пробуем переподключиться
-    peer.reconnect();
+    if (peer.destroyed) return;
+    setStatus('отключён, переподключение...');
+    setTimeout(() => {
+      if (!peer.destroyed && !peer.open) {
+        peer.reconnect();
+      }
+    }, 2000);
   });
 }
 
