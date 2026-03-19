@@ -1,6 +1,6 @@
 // === Ghost Mesh Chat — Service Worker ===
 
-const CACHE_NAME = 'ghost-mesh-v9';
+const CACHE_NAME = 'ghost-mesh-v10';
 
 // Файлы для кэширования (офлайн-оболочка)
 const ASSETS = [

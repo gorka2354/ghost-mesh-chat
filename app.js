@@ -312,23 +312,52 @@ function scheduleSignalingReconnect() {
 function reinitPeer() {
   resetReconnectState();
   peerRetries = 0;
-  const oldPeerId = peer ? peer.id : null;
+
+  // Сохраняем список пиров для переподключения после reinit
+  const savedPeers = [];
+  for (const [peerId, entry] of connections) {
+    savedPeers.push(peerId);
+  }
+  // Также сохраняем пиров из грейса
+  for (const [peerId] of peerGraceTimers) {
+    if (!savedPeers.includes(peerId)) savedPeers.push(peerId);
+  }
+  dlog('reinit: сохранены пиры для реконнекта: ' + (savedPeers.length > 0 ? savedPeers.join(', ') : 'нет'));
+
+  // Очищаем грейсы — будем переподключаться заново
+  for (const [peerId] of peerGraceTimers) cancelPeerGrace(peerId);
+  connections.clear();
+  stopPingLoop();
 
   // Уничтожаем старый peer
   if (peer && !peer.destroyed) {
     try { peer.destroy(); } catch (e) {}
   }
 
+  // Callback после успешного подключения к signaling — переподключаемся к пирам
+  const onReconnected = () => {
+    if (savedPeers.length > 0) {
+      dlog('reinit: переподключаюсь к ' + savedPeers.length + ' пир(ам)', 'ok');
+      for (const peerId of savedPeers) {
+        connectToPeer(peerId);
+      }
+    }
+    // Если есть roomId и мы гость — подключаемся к комнате тоже
+    if (roomId && !isHost && !savedPeers.includes(roomId)) {
+      connectToRoom(roomId);
+    }
+  };
+
   // Определяем с каким ID переподключаться
   if (isHost && roomId) {
     dlog('reinit: переинициализация как хост ' + roomId, 'warn');
     setSignalingStatus('reconnecting');
-    initPeer(roomId, onOpenAsHost);
+    initPeer(roomId, () => { onOpenAsHost(); onReconnected(); });
   } else {
     const newId = myNickname + '-' + Math.random().toString(16).substring(2, 4);
     dlog('reinit: переинициализация как ' + newId, 'warn');
     setSignalingStatus('reconnecting');
-    initPeer(newId);
+    initPeer(newId, onReconnected);
   }
 }
 
