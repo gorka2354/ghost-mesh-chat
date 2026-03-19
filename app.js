@@ -31,11 +31,12 @@ function generateRoomId() {
 
 // --- Состояние ---
 let peer = null;
-let conn = null;
 let isHost = false;
 let roomId = null;
-const myNickname = generateId(); // никнейм — всегда ghost-XXXX
-let peerNickname = null;         // никнейм собеседника
+const myNickname = generateId();
+
+// Все активные соединения: peerId -> { conn, nickname }
+const connections = new Map();
 
 // --- Проверяем hash в URL (приглашение) ---
 function checkInviteLink() {
@@ -44,6 +45,20 @@ function checkInviteLink() {
     return hash;
   }
   return null;
+}
+
+// --- Переключение на экран чата ---
+function showChat() {
+  connectScreen.classList.add('hidden');
+  roomScreen.classList.add('hidden');
+  chatScreen.classList.remove('hidden');
+
+  if (roomId) {
+    roomIdDisplay.textContent = '# ' + roomId;
+  } else {
+    roomIdDisplay.textContent = '# direct';
+  }
+  msgInput.focus();
 }
 
 // --- Инициализация PeerJS ---
@@ -60,24 +75,22 @@ function initPeer(peerId, onOpen) {
 
   // Входящее соединение
   peer.on('connection', (incoming) => {
-    conn = incoming;
-    setupConnection();
+    handleConnection(incoming);
   });
 
   peer.on('error', (err) => {
     if (err.type === 'unavailable-id') {
       peer.destroy();
-      // Если хост — пробуем другой room ID
       if (isHost) {
         roomId = generateRoomId();
         initPeer(roomId, onOpenAsHost);
       } else {
-        initPeer(generateId() + '-' + Math.random().toString(16).substring(2, 4));
+        initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4));
       }
       return;
     }
     if (err.type === 'peer-unavailable') {
-      setStatus('собеседник не найден');
+      setStatus('пир не найден');
       addSystemMessage('не удалось подключиться — ID не найден');
       return;
     }
@@ -106,88 +119,129 @@ function createRoom() {
   roomId = generateRoomId();
   isHost = true;
 
-  // Пересоздаём peer с room ID — чтобы гости подключались по нему
   peer.destroy();
   initPeer(roomId, onOpenAsHost);
 }
 
-// --- Подключение к собеседнику ---
+// --- Подключение к конкретному peer ID ---
 function connectToPeer(remotePeerId) {
   const id = remotePeerId.trim();
-  if (!id) return;
+  if (!id || connections.has(id)) return;
 
-  conn = peer.connect(id, { reliable: true });
-  setupConnection();
+  const conn = peer.connect(id, { reliable: true });
+  handleConnection(conn);
 }
 
-// --- Настройка соединения ---
-function setupConnection() {
+// --- Обработка соединения (входящего или исходящего) ---
+function handleConnection(conn) {
   conn.on('open', () => {
-    // Отправляем свой никнейм как первое служебное сообщение
-    conn.send(JSON.stringify({ type: 'hello', nickname: myNickname }));
+    // Сохраняем соединение (никнейм придёт позже в hello)
+    connections.set(conn.peer, { conn: conn, nickname: null });
 
-    // Переключаемся на экран чата
-    connectScreen.classList.add('hidden');
-    roomScreen.classList.add('hidden');
-    chatScreen.classList.remove('hidden');
+    // Отправляем свой никнейм
+    sendTo(conn, { type: 'hello', nickname: myNickname });
 
-    // Показываем ID комнаты в заголовке
-    if (roomId) {
-      roomIdDisplay.textContent = '# ' + roomId;
-    } else {
-      roomIdDisplay.textContent = '# direct';
+    // Если мы хост — отправляем новичку список всех пиров в комнате
+    if (isHost) {
+      const peerList = [];
+      for (const [peerId, data] of connections) {
+        // Не отправляем новичку его же ID
+        if (peerId !== conn.peer) {
+          peerList.push(peerId);
+        }
+      }
+      if (peerList.length > 0) {
+        sendTo(conn, { type: 'peers', list: peerList });
+      }
     }
-    updateOnlineCount(1);
 
-    setStatus('подключён');
-    msgInput.focus();
+    showChat();
+    updateOnlineCount();
+    setStatus('подключён — ' + connections.size + ' пир(ов)');
   });
 
   conn.on('data', (raw) => {
-    // Пробуем распарсить как служебное сообщение
+    // Парсим служебные сообщения
     let parsed = null;
     if (typeof raw === 'string') {
       try { parsed = JSON.parse(raw); } catch (e) { /* обычный текст */ }
     }
 
     if (parsed && parsed.type === 'hello') {
-      // Получили никнейм собеседника
-      peerNickname = parsed.nickname;
-      addSystemMessage('подключился ' + peerNickname);
-      setStatus('подключён к ' + peerNickname);
+      // Сохраняем никнейм пира
+      const entry = connections.get(conn.peer);
+      if (entry) entry.nickname = parsed.nickname;
+      addSystemMessage(parsed.nickname + ' подключился');
+      updateOnlineCount();
       return;
     }
 
-    // Обычное сообщение
-    const author = peerNickname || conn.peer;
+    if (parsed && parsed.type === 'peers') {
+      // Получили список пиров от хоста — подключаемся к каждому
+      for (const peerId of parsed.list) {
+        if (!connections.has(peerId) && peerId !== peer.id) {
+          connectToPeer(peerId);
+        }
+      }
+      return;
+    }
+
+    if (parsed && parsed.type === 'msg') {
+      // Сообщение от пира
+      addMessage(parsed.nickname, parsed.text);
+      return;
+    }
+
+    // Обычный текст (обратная совместимость)
+    const entry = connections.get(conn.peer);
+    const author = (entry && entry.nickname) || conn.peer;
     addMessage(author, raw);
   });
 
   conn.on('close', () => {
-    const name = peerNickname || conn.peer;
+    const entry = connections.get(conn.peer);
+    const name = (entry && entry.nickname) || conn.peer;
+    connections.delete(conn.peer);
     addSystemMessage(name + ' отключился');
-    setStatus('отключён');
-    updateOnlineCount(0);
-    peerNickname = null;
+    updateOnlineCount();
+    setStatus(connections.size > 0
+      ? 'подключён — ' + connections.size + ' пир(ов)'
+      : 'все отключились');
   });
 
   conn.on('error', (err) => {
-    addSystemMessage('ошибка соединения: ' + err);
+    addSystemMessage('ошибка соединения с ' + conn.peer + ': ' + err);
   });
 }
 
+// --- Отправка служебного сообщения конкретному пиру ---
+function sendTo(conn, obj) {
+  conn.send(JSON.stringify(obj));
+}
+
+// --- Broadcast — отправка всем подключённым пирам ---
+function broadcast(obj) {
+  const data = JSON.stringify(obj);
+  for (const [peerId, entry] of connections) {
+    if (entry.conn.open) {
+      entry.conn.send(data);
+    }
+  }
+}
+
 // --- Счётчик онлайн ---
-function updateOnlineCount(peers) {
-  const total = peers + 1;
+function updateOnlineCount() {
+  const total = connections.size + 1; // +1 за себя
   onlineCountEl.textContent = total + ' online';
 }
 
 // --- Отправка сообщения ---
 function sendMessage() {
   const text = msgInput.value.trim();
-  if (!text || !conn || !conn.open) return;
+  if (!text || connections.size === 0) return;
 
-  conn.send(text);
+  // Отправляем всем как структурированное сообщение
+  broadcast({ type: 'msg', nickname: myNickname, text: text });
   addMessage(myNickname, text, true);
   msgInput.value = '';
 }
@@ -261,11 +315,18 @@ inviteLinkEl.addEventListener('click', () => {
   copyToClipboard(inviteLinkEl.textContent, inviteLinkEl);
 });
 
+// --- Корректное отключение при закрытии вкладки ---
+window.addEventListener('beforeunload', () => {
+  for (const [peerId, entry] of connections) {
+    entry.conn.close();
+  }
+  if (peer) peer.destroy();
+});
+
 // --- Старт ---
 const inviteOnStart = checkInviteLink();
 if (inviteOnStart) {
   roomId = inviteOnStart;
-  // Инициализируемся со своим случайным ID, потом подключаемся к комнате
   initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4), () => {
     connectToPeer(inviteOnStart);
   });
