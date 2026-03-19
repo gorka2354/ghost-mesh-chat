@@ -1,0 +1,17 @@
+{
+  "name": "Ghost Mesh Chat",
+  "short_name": "GhostMesh",
+  "description": "Анонимный P2P мессенджер — без серверов, без регистрации, без следов",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1a1b26",
+  "theme_color": "#1a1b26",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
