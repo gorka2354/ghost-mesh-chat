@@ -251,8 +251,11 @@ function showChat() {
 let peerRetries = 0;
 const MAX_PEER_RETRIES = 3;
 
-// Конфигурация PeerJS с явными параметрами
+// Конфигурация PeerJS — свой signaling-сервер
 const PEER_CONFIG = {
+  host: 'ghost-mesh-signal.onrender.com',
+  port: 443,
+  path: '/',
   secure: true,
   debug: 0,
   config: {
