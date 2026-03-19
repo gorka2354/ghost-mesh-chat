@@ -78,6 +78,15 @@ let typewriterEnabled = true;
 const FILE_MAX_SIZE = 50 * 1024 * 1024;
 const CHUNK_SIZE = 16000;
 
+// --- Ping/pong и peer reconnect ---
+const PING_INTERVAL = 15000;  // пинг каждые 15 сек
+const PONG_TIMEOUT = 5000;    // ждём pong 5 сек
+const PEER_GRACE_PERIOD = 30000; // 30 сек грейс перед "отключился"
+const MAX_PEER_RECONNECT = 3;   // макс попыток реконнекта к пиру
+let pingIntervalId = null;
+const peerPongTimers = new Map();    // peerId → timeout (ожидание pong)
+const peerGraceTimers = new Map();   // peerId → { timer, reconnectCount, nickname, publicKeyRaw }
+
 // Таймеры "печатает"
 const typingTimers = new Map();
 
@@ -475,10 +484,119 @@ async function broadcastEncrypted(obj) {
   }
 }
 
+// --- Ping/pong система для детекции обрывов ---
+function startPingLoop() {
+  if (pingIntervalId) return;
+  pingIntervalId = setInterval(() => {
+    for (const [peerId, entry] of connections) {
+      if (entry.conn.open) {
+        try {
+          sendToRaw(entry.conn, { type: 'ping', ts: Date.now() });
+        } catch (e) {}
+        // Ставим таймер ожидания pong
+        if (!peerPongTimers.has(peerId)) {
+          peerPongTimers.set(peerId, setTimeout(() => {
+            peerPongTimers.delete(peerId);
+            dlog('ping timeout: ' + (entry.nickname || peerId) + ' не ответил', 'warn');
+            // DataChannel возможно мёртв — закрываем, сработает reconnect через грейс
+            if (entry.conn.open) {
+              try { entry.conn.close(); } catch (e) {}
+            }
+          }, PONG_TIMEOUT));
+        }
+      }
+    }
+  }, PING_INTERVAL);
+}
+
+function stopPingLoop() {
+  if (pingIntervalId) {
+    clearInterval(pingIntervalId);
+    pingIntervalId = null;
+  }
+  for (const [, timer] of peerPongTimers) clearTimeout(timer);
+  peerPongTimers.clear();
+}
+
+// Обработка pong — пир жив
+function handlePong(peerId) {
+  const timer = peerPongTimers.get(peerId);
+  if (timer) {
+    clearTimeout(timer);
+    peerPongTimers.delete(peerId);
+  }
+}
+
+// --- Грейс-период и reconnect к пиру ---
+function startPeerGrace(peerId, nickname, publicKeyRaw) {
+  // Уже в грейсе — не дублируем
+  if (peerGraceTimers.has(peerId)) return;
+
+  const graceInfo = { reconnectCount: 0, nickname: nickname, publicKeyRaw: publicKeyRaw, timer: null };
+  peerGraceTimers.set(peerId, graceInfo);
+
+  dlog('grace: ' + (nickname || peerId) + ' — ждём реконнект (' + (PEER_GRACE_PERIOD / 1000) + 's)', 'warn');
+  updateOnlineCount();
+
+  // Пробуем переподключиться
+  attemptPeerReconnect(peerId, graceInfo);
+
+  // Таймер грейс-периода — если за 30 сек не восстановилось, считаем отключённым
+  graceInfo.timer = setTimeout(() => {
+    if (peerGraceTimers.has(peerId)) {
+      peerGraceTimers.delete(peerId);
+      dlog('grace: ' + (nickname || peerId) + ' — грейс истёк, отключён', 'error');
+      addSystemMessage((nickname || peerId) + ' отключился');
+      updateOnlineCount();
+      updateLockIcon();
+    }
+  }, PEER_GRACE_PERIOD);
+}
+
+function attemptPeerReconnect(peerId, graceInfo) {
+  if (!peerGraceTimers.has(peerId)) return;
+  if (!peer || !peer.open) return;
+  if (graceInfo.reconnectCount >= MAX_PEER_RECONNECT) return;
+
+  graceInfo.reconnectCount++;
+  dlog('peer reconnect: ' + (graceInfo.nickname || peerId) + ' попытка ' + graceInfo.reconnectCount + '/' + MAX_PEER_RECONNECT);
+
+  const conn = peer.connect(peerId, { reliable: true });
+  handleConnection(conn, graceInfo);
+}
+
+function cancelPeerGrace(peerId) {
+  const grace = peerGraceTimers.get(peerId);
+  if (grace) {
+    if (grace.timer) clearTimeout(grace.timer);
+    peerGraceTimers.delete(peerId);
+  }
+}
+
+// Проверка всех DataChannel (вызывается при visibilitychange)
+function checkAllConnections() {
+  for (const [peerId, entry] of connections) {
+    if (!entry.conn.open) {
+      dlog('check: DataChannel с ' + (entry.nickname || peerId) + ' мёртв', 'warn');
+      const nickname = entry.nickname;
+      const pubKey = entry.publicKeyRaw;
+      connections.delete(peerId);
+      startPeerGrace(peerId, nickname, pubKey);
+    }
+  }
+}
+
 // --- Обработка соединения ---
-function handleConnection(conn) {
+function handleConnection(conn, graceInfo) {
   conn.on('open', () => {
-    connections.set(conn.peer, { conn: conn, nickname: null, sharedKey: null, publicKeyRaw: null });
+    // Проверяем — это реконнект после грейса?
+    const wasInGrace = peerGraceTimers.has(conn.peer);
+    if (wasInGrace) {
+      cancelPeerGrace(conn.peer);
+      dlog('peer reconnected: ' + conn.peer + ' (из грейса)', 'ok');
+    }
+
+    connections.set(conn.peer, { conn: conn, nickname: (graceInfo && graceInfo.nickname) || null, sharedKey: null, publicKeyRaw: (graceInfo && graceInfo.publicKeyRaw) || null });
 
     // Отправляем hello с публичным ключом
     sendToRaw(conn, { type: 'hello', nickname: myNickname, publicKey: myPublicKeyJwk });
@@ -495,6 +613,7 @@ function handleConnection(conn) {
     }
 
     showChat();
+    startPingLoop();
     updateOnlineCount();
     setStatus('подключён — ' + connections.size + ' пир(ов)');
   });
@@ -561,6 +680,16 @@ function handleConnection(conn) {
       return;
     }
 
+    // Ping/pong — heartbeat между пирами
+    if (parsed.type === 'ping') {
+      try { sendToRaw(conn, { type: 'pong', ts: parsed.ts }); } catch (e) {}
+      return;
+    }
+    if (parsed.type === 'pong') {
+      handlePong(conn.peer);
+      return;
+    }
+
     // Всё остальное — обрабатываем как нешифрованное (fallback)
     await handleDecryptedMessage(conn, parsed);
   });
@@ -568,14 +697,26 @@ function handleConnection(conn) {
   conn.on('close', () => {
     const entry = connections.get(conn.peer);
     const name = (entry && entry.nickname) || conn.peer;
+    const pubKey = entry ? entry.publicKeyRaw : null;
     connections.delete(conn.peer);
     clearTypingTimer(conn.peer);
-    addSystemMessage(name + ' отключился');
-    updateOnlineCount();
-    updateLockIcon();
+
+    // Грейс-период — пробуем реконнект перед "отключился"
+    if (peer && peer.open && !peerGraceTimers.has(conn.peer)) {
+      startPeerGrace(conn.peer, name, pubKey);
+    } else if (!peerGraceTimers.has(conn.peer)) {
+      // Signaling тоже мёртв — сразу отключаем
+      addSystemMessage(name + ' отключился');
+      updateOnlineCount();
+      updateLockIcon();
+    }
+
     setStatus(connections.size > 0
       ? 'подключён — ' + connections.size + ' пир(ов)'
-      : 'все отключились');
+      : (peerGraceTimers.size > 0 ? 'переподключение...' : 'все отключились'));
+
+    // Если нет активных соединений и нет грейсов — остановить пинг
+    if (connections.size === 0 && peerGraceTimers.size === 0) stopPingLoop();
   });
 
   conn.on('error', (err) => {
@@ -862,8 +1003,14 @@ function formatDuration(seconds) {
 
 // --- Счётчик онлайн ---
 function updateOnlineCount() {
-  const total = connections.size + 1;
-  onlineCountEl.textContent = total + ' online';
+  const connected = connections.size;
+  const inGrace = peerGraceTimers.size;
+  const total = connected + 1;
+  if (inGrace > 0) {
+    onlineCountEl.textContent = total + ' online (+' + inGrace + ' reconnecting)';
+  } else {
+    onlineCountEl.textContent = total + ' online';
+  }
 }
 
 // --- Отправка сообщения ---
@@ -1249,6 +1396,8 @@ document.addEventListener('visibilitychange', () => {
       reinitPeer();
     } else if (peer && peer.open) {
       setSignalingStatus('online');
+      // Проверяем все DataChannel
+      checkAllConnections();
     }
   }
 });
