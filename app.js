@@ -217,10 +217,30 @@ function showChat() {
 }
 
 // --- Инициализация PeerJS ---
+let peerRetries = 0;
+const MAX_PEER_RETRIES = 3;
+
 function initPeer(peerId, onOpen) {
   peer = new Peer(peerId);
 
+  // Таймаут подключения к signaling-серверу (10 сек)
+  const connectTimeout = setTimeout(() => {
+    if (!peer.open) {
+      setStatus('signaling не отвечает, повтор...');
+      if (peerRetries < MAX_PEER_RETRIES) {
+        peerRetries++;
+        peer.destroy();
+        initPeer(peerId, onOpen);
+      } else {
+        setStatus('не удалось подключиться к signaling');
+        addSystemMessage('PeerJS Cloud недоступен. Попробуй обновить страницу.');
+      }
+    }
+  }, 10000);
+
   peer.on('open', (id) => {
+    clearTimeout(connectTimeout);
+    peerRetries = 0;
     myIdEl.textContent = myNickname;
     myIdCopyEl.textContent = myNickname;
     setStatus('online — ожидание');
@@ -232,6 +252,7 @@ function initPeer(peerId, onOpen) {
   });
 
   peer.on('error', (err) => {
+    clearTimeout(connectTimeout);
     if (err.type === 'unavailable-id') {
       peer.destroy();
       if (isHost) {
@@ -248,10 +269,13 @@ function initPeer(peerId, onOpen) {
       return;
     }
     setStatus('ошибка: ' + err.type);
+    addSystemMessage('PeerJS ошибка: ' + err.type + ' — ' + err.message);
   });
 
   peer.on('disconnected', () => {
-    setStatus('отключён от signaling');
+    setStatus('отключён от signaling, переподключение...');
+    // Пробуем переподключиться
+    peer.reconnect();
   });
 }
 
@@ -876,8 +900,15 @@ window.addEventListener('beforeunload', () => {
 
 // --- Старт (async для генерации ключей) ---
 (async function start() {
-  // Генерируем ключи шифрования
-  await generateKeyPair();
+  try {
+    setStatus('генерация ключей...');
+    await generateKeyPair();
+    setStatus('ключи готовы, подключение...');
+  } catch (e) {
+    // Если crypto не поддерживается — работаем без шифрования
+    setStatus('crypto недоступен, без шифрования');
+    myPublicKeyJwk = null;
+  }
 
   const inviteOnStart = checkInviteLink();
   if (inviteOnStart) {
