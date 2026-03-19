@@ -279,6 +279,25 @@ button:hover {
   color: var(--accent);
 }
 
+.chat-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#lock-icon {
+  cursor: pointer;
+  font-size: 12px;
+}
+
+#lock-icon.lock-on {
+  color: var(--green);
+}
+
+#lock-icon.lock-partial {
+  color: var(--accent);
+}
+
 #online-count {
   color: var(--green);
 }
