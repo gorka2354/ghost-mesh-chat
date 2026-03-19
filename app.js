@@ -21,6 +21,37 @@ const typingIndicator = document.getElementById('typing-indicator');
 const typingNick = document.getElementById('typing-nick');
 const typewriterToggle = document.getElementById('typewriter-toggle');
 const lockIcon = document.getElementById('lock-icon');
+const debugToggle = document.getElementById('debug-toggle');
+const debugPanel = document.getElementById('debug-panel');
+const debugLog = document.getElementById('debug-log');
+
+// --- Debug-логирование ---
+function dlog(msg, level = 'info') {
+  // В консоль всегда
+  console.log('[ghost-mesh]', msg);
+
+  if (!debugLog) return;
+  const line = document.createElement('div');
+  line.className = 'debug-line' + (level === 'error' ? ' debug-error' : level === 'warn' ? ' debug-warn' : level === 'ok' ? ' debug-ok' : '');
+  const time = new Date().toTimeString().substring(0, 8);
+  line.innerHTML = '<span class="debug-time">' + time + '</span>' + escapeHtmlSimple(msg);
+  debugLog.appendChild(line);
+  debugPanel.scrollTop = debugPanel.scrollHeight;
+}
+
+// Простой escapeHtml без зависимости от DOM (для раннего вызова)
+function escapeHtmlSimple(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Перехватываем глобальные ошибки
+window.addEventListener('error', (e) => {
+  dlog('JS ERROR: ' + e.message + ' @ ' + e.filename + ':' + e.lineno, 'error');
+});
+
+window.addEventListener('unhandledrejection', (e) => {
+  dlog('PROMISE ERROR: ' + e.reason, 'error');
+});
 
 // --- Генерация ID ---
 function generateId() {
@@ -233,6 +264,7 @@ const PEER_CONFIG = {
 };
 
 function initPeer(peerId, onOpen) {
+  dlog('initPeer: id=' + peerId + ', retry=' + peerRetries);
   peer = new Peer(peerId, PEER_CONFIG);
 
   // Таймаут подключения к signaling-серверу (10 сек)
@@ -240,12 +272,13 @@ function initPeer(peerId, onOpen) {
     if (!peer.open && !peer.destroyed) {
       if (peerRetries < MAX_PEER_RETRIES) {
         peerRetries++;
+        dlog('signaling timeout, retry ' + peerRetries, 'warn');
         setStatus('signaling не отвечает, повтор ' + peerRetries + '/' + MAX_PEER_RETRIES);
         peer.destroy();
         initPeer(peerId, onOpen);
       } else {
+        dlog('signaling failed after ' + MAX_PEER_RETRIES + ' retries', 'error');
         setStatus('signaling недоступен');
-        addSystemMessage('PeerJS Cloud недоступен. Попробуй обновить страницу.');
       }
     }
   }, 10000);
@@ -253,6 +286,7 @@ function initPeer(peerId, onOpen) {
   peer.on('open', (id) => {
     clearTimeout(connectTimeout);
     peerRetries = 0;
+    dlog('peer.open: id=' + id, 'ok');
     myIdEl.textContent = myNickname;
     myIdCopyEl.textContent = myNickname;
     setStatus('online — ожидание');
@@ -260,11 +294,13 @@ function initPeer(peerId, onOpen) {
   });
 
   peer.on('connection', (incoming) => {
+    dlog('incoming connection from ' + incoming.peer);
     handleConnection(incoming);
   });
 
   peer.on('error', (err) => {
     clearTimeout(connectTimeout);
+    dlog('peer.error: type=' + err.type + ' msg=' + err.message, 'error');
     if (err.type === 'unavailable-id') {
       peer.destroy();
       if (isHost) {
@@ -277,17 +313,18 @@ function initPeer(peerId, onOpen) {
     }
     if (err.type === 'peer-unavailable') {
       setStatus('пир не найден');
-      addSystemMessage('не удалось подключиться — ID не найден');
       return;
     }
     setStatus('ошибка: ' + err.type);
   });
 
   peer.on('disconnected', () => {
+    dlog('peer.disconnected (destroyed=' + peer.destroyed + ')', 'warn');
     if (peer.destroyed) return;
     setStatus('отключён, переподключение...');
     setTimeout(() => {
       if (!peer.destroyed && !peer.open) {
+        dlog('attempting reconnect...');
         peer.reconnect();
       }
     }, 2000);
@@ -914,13 +951,25 @@ window.addEventListener('beforeunload', () => {
 });
 
 // --- Старт (async для генерации ключей) ---
+// Кнопка debug-панели
+debugToggle.addEventListener('click', () => {
+  debugPanel.classList.toggle('hidden');
+  debugToggle.classList.toggle('active', !debugPanel.classList.contains('hidden'));
+  debugToggle.textContent = debugPanel.classList.contains('hidden') ? '▸ log' : '▾ log';
+});
+
 (async function start() {
+  dlog('start: userAgent=' + navigator.userAgent);
+  dlog('start: url=' + location.href);
+
   try {
     setStatus('генерация ключей...');
+    dlog('generating ECDH keys...');
     await generateKeyPair();
+    dlog('keys generated OK', 'ok');
     setStatus('ключи готовы, подключение...');
   } catch (e) {
-    // Если crypto не поддерживается — работаем без шифрования
+    dlog('crypto error: ' + e.message, 'error');
     setStatus('crypto недоступен, без шифрования');
     myPublicKeyJwk = null;
   }

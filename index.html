@@ -33,6 +33,7 @@
       <span class="logo">ghost-mesh<span class="cursor">_</span></span>
       <div class="header-right">
         <button id="typewriter-toggle" class="icon-btn" title="анимация текста">▸ anim</button>
+        <button id="debug-toggle" class="icon-btn" title="debug лог">▸ log</button>
         <span id="my-id" class="my-id">connecting...</span>
       </div>
     </header>
@@ -92,6 +93,11 @@
         <input type="text" id="msg-input" placeholder="> сообщение..." spellcheck="false" autocomplete="off">
         <button id="send-btn">send</button>
       </div>
+    </div>
+
+    <!-- Debug-панель -->
+    <div id="debug-panel" class="hidden">
+      <div id="debug-log"></div>
     </div>
 
     <!-- Статус-бар -->

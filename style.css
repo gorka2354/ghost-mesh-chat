@@ -588,6 +588,46 @@ button:hover {
   background: var(--bg-card);
 }
 
+/* --- Debug-панель --- */
+#debug-panel {
+  max-height: 180px;
+  overflow-y: auto;
+  background: #0d0e17;
+  border-top: 1px solid var(--border);
+  padding: 6px 12px;
+  font-size: 10px;
+  font-family: var(--font);
+}
+
+#debug-log {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.debug-line {
+  color: var(--muted);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.debug-line .debug-time {
+  color: var(--border);
+  margin-right: 6px;
+}
+
+.debug-line.debug-error {
+  color: #f7768e;
+}
+
+.debug-line.debug-warn {
+  color: var(--accent);
+}
+
+.debug-line.debug-ok {
+  color: var(--green);
+}
+
 /* --- Утилиты --- */
 .hidden {
   display: none !important;
