@@ -951,7 +951,19 @@ window.addEventListener('beforeunload', () => {
 });
 
 // --- Старт (async для генерации ключей) ---
-// Кнопка debug-панели
+// Кнопки debug-панели
+document.getElementById('debug-copy').addEventListener('click', () => {
+  const lines = debugLog.querySelectorAll('.debug-line');
+  const text = Array.from(lines).map(l => l.textContent).join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    setStatus('лог скопирован');
+  });
+});
+
+document.getElementById('debug-clear').addEventListener('click', () => {
+  debugLog.innerHTML = '';
+});
+
 debugToggle.addEventListener('click', () => {
   debugPanel.classList.toggle('hidden');
   debugToggle.classList.toggle('active', !debugPanel.classList.contains('hidden'));
