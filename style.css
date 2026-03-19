@@ -71,6 +71,24 @@ body {
   font-size: 11px;
 }
 
+/* Индикатор signaling-сервера */
+.signal-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--muted);
+  transition: background 0.3s;
+}
+.signal-dot.online { background: var(--green); }
+.signal-dot.reconnecting { background: #e0af68; animation: signalPulse 1s infinite; }
+.signal-dot.offline { background: #f7768e; }
+
+@keyframes signalPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 .icon-btn {
   background: transparent;
   border: 1px solid var(--border);

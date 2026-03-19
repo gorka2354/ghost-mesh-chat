@@ -24,6 +24,7 @@ const lockIcon = document.getElementById('lock-icon');
 const debugToggle = document.getElementById('debug-toggle');
 const debugPanel = document.getElementById('debug-panel');
 const debugLog = document.getElementById('debug-log');
+const signalStatusEl = document.getElementById('signal-status');
 
 // --- Debug-логирование ---
 function dlog(msg, level = 'info') {
@@ -251,6 +252,50 @@ function showChat() {
 let peerRetries = 0;
 const MAX_PEER_RETRIES = 3;
 
+// --- Статус signaling-сервера ---
+let signalingState = 'offline'; // online | reconnecting | offline
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+
+function setSignalingStatus(state) {
+  signalingState = state;
+  signalStatusEl.className = 'signal-dot ' + state;
+  const titles = { online: 'signaling: online', reconnecting: 'signaling: переподключение...', offline: 'signaling: offline' };
+  signalStatusEl.title = titles[state] || state;
+  dlog('signaling status: ' + state, state === 'online' ? 'ok' : state === 'offline' ? 'error' : 'warn');
+}
+
+// Exponential backoff: 2с, 4с, 8с, 16с, 30с макс
+function getReconnectDelay() {
+  const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 30000);
+  return delay;
+}
+
+function scheduleSignalingReconnect() {
+  if (peer.destroyed) return;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+
+  const delay = getReconnectDelay();
+  reconnectAttempts++;
+  dlog('signaling reconnect in ' + (delay / 1000) + 's (attempt ' + reconnectAttempts + ')', 'warn');
+  setStatus('signaling переподключение... (' + reconnectAttempts + ')');
+
+  reconnectTimer = setTimeout(() => {
+    if (!peer.destroyed && !peer.open) {
+      dlog('attempting signaling reconnect...');
+      peer.reconnect();
+    }
+  }, delay);
+}
+
+function resetReconnectState() {
+  reconnectAttempts = 0;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
 // Конфигурация PeerJS — свой signaling-сервер
 const PEER_CONFIG = {
   host: 'ghost-mesh-signal.onrender.com',
@@ -289,6 +334,8 @@ function initPeer(peerId, onOpen) {
   peer.on('open', (id) => {
     clearTimeout(connectTimeout);
     peerRetries = 0;
+    resetReconnectState();
+    setSignalingStatus('online');
     dlog('peer.open: id=' + id, 'ok');
     myIdEl.textContent = myNickname;
     myIdCopyEl.textContent = myNickname;
@@ -324,13 +371,14 @@ function initPeer(peerId, onOpen) {
   peer.on('disconnected', () => {
     dlog('peer.disconnected (destroyed=' + peer.destroyed + ')', 'warn');
     if (peer.destroyed) return;
-    setStatus('отключён, переподключение...');
-    setTimeout(() => {
-      if (!peer.destroyed && !peer.open) {
-        dlog('attempting reconnect...');
-        peer.reconnect();
-      }
-    }, 2000);
+    setSignalingStatus('reconnecting');
+    scheduleSignalingReconnect();
+  });
+
+  // peer.on('close') — полное уничтожение, нужна переинициализация
+  peer.on('close', () => {
+    dlog('peer.close — полное отключение', 'error');
+    setSignalingStatus('offline');
   });
 }
 
@@ -1172,10 +1220,60 @@ debugToggle.addEventListener('click', () => {
   const inviteOnStart = checkInviteLink();
   if (inviteOnStart) {
     roomId = inviteOnStart;
+    dlog('invite link detected: ' + inviteOnStart);
     initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4), () => {
-      connectToPeer(inviteOnStart);
+      dlog('peer ready, connecting to room...');
+      connectToRoom(inviteOnStart);
     });
   } else {
     initPeer(myNickname);
   }
 })();
+
+// --- Подключение к комнате с retry (использует handleConnection) ---
+let roomRetries = 0;
+const MAX_ROOM_RETRIES = 5;
+
+function connectToRoom(roomPeerId) {
+  dlog('connectToRoom: attempt ' + (roomRetries + 1) + ', target=' + roomPeerId);
+  setStatus('подключение к комнате...');
+
+  const conn = peer.connect(roomPeerId, { reliable: true });
+
+  // Таймаут на случай если соединение зависнет
+  const timeout = setTimeout(() => {
+    dlog('room connect timeout', 'warn');
+    try { conn.close(); } catch (e) {}
+    retryRoomConnect(roomPeerId);
+  }, 8000);
+
+  // При успешном открытии — сбрасываем retry и передаём в handleConnection
+  conn.on('open', () => {
+    clearTimeout(timeout);
+    roomRetries = 0;
+    dlog('room connected!', 'ok');
+  });
+
+  conn.on('error', (err) => {
+    clearTimeout(timeout);
+    dlog('room conn error: ' + err, 'error');
+    retryRoomConnect(roomPeerId);
+  });
+
+  // Вся логика обработки (hello, data, close) — через handleConnection
+  handleConnection(conn);
+}
+
+function retryRoomConnect(roomPeerId) {
+  roomRetries++;
+  if (roomRetries <= MAX_ROOM_RETRIES) {
+    const delay = roomRetries * 2000;
+    dlog('retry room in ' + delay + 'ms (' + roomRetries + '/' + MAX_ROOM_RETRIES + ')', 'warn');
+    setStatus('комната не найдена, повтор ' + roomRetries + '/' + MAX_ROOM_RETRIES);
+    setTimeout(() => connectToRoom(roomPeerId), delay);
+  } else {
+    dlog('room connect failed after ' + MAX_ROOM_RETRIES + ' attempts', 'error');
+    setStatus('не удалось подключиться к комнате');
+    addSystemMessage('комната не найдена. Возможно хост отключился или signaling сервер перезапустился.');
+  }
+}
