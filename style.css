@@ -416,15 +416,132 @@ button:hover {
   color: var(--text);
 }
 
+/* --- Файловое сообщение --- */
+.msg-file {
+  margin-top: 4px;
+}
+
+.file-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text);
+  max-width: 100%;
+}
+
+.file-card .file-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.file-card .file-info {
+  min-width: 0;
+}
+
+.file-card .file-name {
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.file-card .file-size {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.file-card a {
+  color: var(--green);
+  text-decoration: none;
+  cursor: pointer;
+  font-size: 10px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.file-card a:hover {
+  text-decoration: underline;
+}
+
+.file-preview {
+  margin-top: 6px;
+  max-width: 280px;
+  max-height: 200px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  image-rendering: auto;
+}
+
+/* --- Прогресс-бар передачи файла --- */
+.file-progress {
+  margin-top: 4px;
+  width: 100%;
+  max-width: 200px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.file-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.15s;
+  width: 0%;
+}
+
+/* --- Drag & drop оверлей --- */
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(26, 27, 38, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  border: 2px dashed var(--accent);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.drag-overlay span {
+  color: var(--accent);
+  font-size: 14px;
+  font-family: var(--font);
+}
+
 /* --- Ввод сообщений --- */
 #chat-input-row {
   display: flex;
   gap: 0;
   border-top: 1px solid var(--border);
   background: var(--bg-card);
+  align-items: center;
 }
 
-#chat-input-row input {
+.file-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 100%;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--muted);
+  transition: color 0.2s;
+  border-right: 1px solid var(--border);
+  padding: 12px 0;
+}
+
+.file-label:hover {
+  color: var(--accent);
+}
+
+#chat-input-row input[type="text"] {
   flex: 1;
   border: none;
   border-radius: 0;
@@ -432,7 +549,7 @@ button:hover {
   background: var(--bg-card);
 }
 
-#chat-input-row input:focus {
+#chat-input-row input[type="text"]:focus {
   border-color: transparent;
 }
 

@@ -41,9 +41,14 @@ const connections = new Map(); // peerId -> { conn, nickname }
 
 // Настройки
 let typewriterEnabled = true; // анимация посимвольного ввода
+const FILE_MAX_SIZE = 50 * 1024 * 1024; // 50 МБ
+const CHUNK_SIZE = 16000; // ~16KB чанки для DataChannel
 
 // Таймеры "печатает"
 const typingTimers = new Map(); // peerId -> timeoutId
+
+// Буферы входящих файлов: transferId -> { meta, chunks[], received }
+const incomingFiles = new Map();
 
 // --- Пиксельная аватарка 4x4 из хэша никнейма ---
 function generateAvatar(nickname) {
@@ -295,6 +300,44 @@ function handleConnection(conn) {
       return;
     }
 
+    if (parsed && parsed.type === 'file-meta') {
+      // Начало передачи файла — создаём буфер
+      incomingFiles.set(parsed.transferId, {
+        meta: parsed,
+        chunks: [],
+        received: 0,
+        progressEl: null
+      });
+      // Показываем карточку с прогрессом
+      const entry = connections.get(conn.peer);
+      const nick = (entry && entry.nickname) || parsed.nickname;
+      addFileMessage(nick, parsed, false);
+      return;
+    }
+
+    if (parsed && parsed.type === 'file-chunk') {
+      const transfer = incomingFiles.get(parsed.transferId);
+      if (!transfer) return;
+      transfer.chunks.push(parsed.data);
+      transfer.received++;
+      // Обновляем прогресс
+      const pct = Math.round((transfer.received / transfer.meta.totalChunks) * 100);
+      if (transfer.progressEl) {
+        transfer.progressEl.style.width = pct + '%';
+      }
+      return;
+    }
+
+    if (parsed && parsed.type === 'file-done') {
+      const transfer = incomingFiles.get(parsed.transferId);
+      if (!transfer) return;
+      // Собираем файл из чанков
+      finalizeFileReceive(transfer);
+      incomingFiles.delete(parsed.transferId);
+      playNotificationSound();
+      return;
+    }
+
     // Обычный текст
     const entry = connections.get(conn.peer);
     const author = (entry && entry.nickname) || conn.peer;
@@ -443,6 +486,200 @@ function addSystemMessage(text) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// --- Передача файлов ---
+function sendFile(file) {
+  if (!file || connections.size === 0) return;
+
+  if (file.size > FILE_MAX_SIZE) {
+    addSystemMessage('файл слишком большой (макс. 50 МБ)');
+    return;
+  }
+
+  const transferId = myNickname + '-' + Date.now();
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+  // Отправляем метаданные
+  const meta = {
+    type: 'file-meta',
+    transferId: transferId,
+    nickname: myNickname,
+    fileName: file.name,
+    fileSize: file.size,
+    fileType: file.type,
+    totalChunks: totalChunks
+  };
+  broadcast(meta);
+
+  // Показываем карточку у себя (с локальным файлом для превью)
+  addFileMessage(myNickname, Object.assign({}, meta, { localFile: file }), true);
+
+  // Читаем и отправляем чанками
+  const reader = new FileReader();
+  reader.onload = () => {
+    const buffer = reader.result;
+    const uint8 = new Uint8Array(buffer);
+    let chunkIndex = 0;
+
+    function sendNextChunk() {
+      if (chunkIndex >= totalChunks) {
+        // Все чанки отправлены
+        broadcast({ type: 'file-done', transferId: transferId });
+        return;
+      }
+
+      const start = chunkIndex * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, uint8.length);
+      const chunk = Array.from(uint8.slice(start, end));
+
+      broadcast({
+        type: 'file-chunk',
+        transferId: transferId,
+        index: chunkIndex,
+        data: chunk
+      });
+
+      chunkIndex++;
+
+      // Обновляем свой прогресс
+      const pct = Math.round((chunkIndex / totalChunks) * 100);
+      const myProgress = document.getElementById('progress-' + transferId);
+      if (myProgress) myProgress.style.width = pct + '%';
+
+      // Небольшая задержка чтобы не забить канал
+      setTimeout(sendNextChunk, 5);
+    }
+
+    sendNextChunk();
+  };
+
+  reader.readAsArrayBuffer(file);
+}
+
+// Сборка полученного файла
+function finalizeFileReceive(transfer) {
+  const allBytes = [];
+  for (const chunk of transfer.chunks) {
+    for (const byte of chunk) {
+      allBytes.push(byte);
+    }
+  }
+  const uint8 = new Uint8Array(allBytes);
+  const blob = new Blob([uint8], { type: transfer.meta.fileType });
+  const url = URL.createObjectURL(blob);
+
+  // Обновляем карточку — заменяем прогресс на ссылку скачивания
+  const card = document.getElementById('card-' + transfer.meta.transferId);
+  if (!card) return;
+
+  const progressDiv = card.querySelector('.file-progress');
+  if (progressDiv) progressDiv.remove();
+
+  // Добавляем кнопку скачивания
+  const downloadLink = document.createElement('a');
+  downloadLink.href = url;
+  downloadLink.download = transfer.meta.fileName;
+  downloadLink.textContent = 'save';
+  card.appendChild(downloadLink);
+
+  // Превью для изображений
+  if (transfer.meta.fileType && transfer.meta.fileType.startsWith('image/')) {
+    const preview = document.createElement('img');
+    preview.className = 'file-preview';
+    preview.src = url;
+    card.parentElement.appendChild(preview);
+  }
+}
+
+// Отображение файлового сообщения
+function addFileMessage(author, meta, isMe) {
+  const div = document.createElement('div');
+  div.className = 'msg';
+
+  const avatar = document.createElement('img');
+  avatar.className = 'msg-avatar';
+  avatar.src = generateAvatar(author);
+  avatar.alt = author;
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+
+  const header = document.createElement('div');
+  header.className = 'msg-header';
+  header.innerHTML =
+    '<span class="author ' + (isMe ? 'me' : '') + '">' + escapeHtml(author) + '</span>' +
+    '<span class="time">' + getTimeString() + '</span>';
+
+  const fileDiv = document.createElement('div');
+  fileDiv.className = 'msg-file';
+
+  const card = document.createElement('div');
+  card.className = 'file-card';
+  card.id = 'card-' + meta.transferId;
+
+  const icon = document.createElement('span');
+  icon.className = 'file-icon';
+  icon.textContent = getFileIcon(meta.fileType);
+
+  const info = document.createElement('div');
+  info.className = 'file-info';
+  info.innerHTML =
+    '<div class="file-name">' + escapeHtml(meta.fileName) + '</div>' +
+    '<div class="file-size">' + formatFileSize(meta.fileSize) + '</div>';
+
+  card.appendChild(icon);
+  card.appendChild(info);
+
+  // Прогресс-бар
+  const progressWrap = document.createElement('div');
+  progressWrap.className = 'file-progress';
+  const progressBar = document.createElement('div');
+  progressBar.className = 'file-progress-bar';
+  progressBar.id = 'progress-' + meta.transferId;
+  progressWrap.appendChild(progressBar);
+  card.appendChild(progressWrap);
+
+  // Для входящих — сохраняем ссылку на прогресс
+  if (!isMe) {
+    const transfer = incomingFiles.get(meta.transferId);
+    if (transfer) transfer.progressEl = progressBar;
+  }
+
+  fileDiv.appendChild(card);
+  body.appendChild(header);
+  body.appendChild(fileDiv);
+  div.appendChild(avatar);
+  div.appendChild(body);
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  // Превью для отправителя — файл уже есть локально
+  if (isMe && meta.localFile && meta.fileType && meta.fileType.startsWith('image/')) {
+    const url = URL.createObjectURL(meta.localFile);
+    const preview = document.createElement('img');
+    preview.className = 'file-preview';
+    preview.src = url;
+    fileDiv.appendChild(preview);
+  }
+}
+
+// Иконка по типу файла
+function getFileIcon(fileType) {
+  if (!fileType) return '📄';
+  if (fileType.startsWith('image/')) return '🖼';
+  if (fileType.startsWith('video/')) return '🎬';
+  if (fileType.startsWith('audio/')) return '🎵';
+  if (fileType.includes('pdf')) return '📕';
+  if (fileType.includes('zip') || fileType.includes('rar') || fileType.includes('7z')) return '📦';
+  return '📄';
+}
+
+// Форматирование размера файла
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 // --- Статус ---
 function setStatus(text) {
   statusEl.textContent = '[ ' + text + ' ]';
@@ -495,6 +732,69 @@ copyLinkBtn.addEventListener('click', () => {
 inviteLinkEl.addEventListener('click', () => {
   copyToClipboard(inviteLinkEl.textContent, inviteLinkEl);
 });
+
+// --- Отправка файлов ---
+const fileInput = document.getElementById('file-input');
+const fileBtn = document.getElementById('file-btn');
+
+fileBtn.addEventListener('click', () => {
+  fileInput.click();
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length > 0) {
+    sendFile(fileInput.files[0]);
+    fileInput.value = ''; // сброс
+  }
+});
+
+// --- Drag & drop ---
+let dragCounter = 0;
+
+messagesEl.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragCounter++;
+  if (dragCounter === 1) {
+    showDragOverlay();
+  }
+});
+
+messagesEl.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter === 0) {
+    hideDragOverlay();
+  }
+});
+
+messagesEl.addEventListener('dragover', (e) => {
+  e.preventDefault();
+});
+
+messagesEl.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragCounter = 0;
+  hideDragOverlay();
+
+  if (e.dataTransfer.files.length > 0) {
+    sendFile(e.dataTransfer.files[0]);
+  }
+});
+
+function showDragOverlay() {
+  if (document.getElementById('drag-overlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'drag-overlay';
+  overlay.className = 'drag-overlay';
+  overlay.innerHTML = '<span>> перетащи файл сюда</span>';
+  messagesEl.style.position = 'relative';
+  messagesEl.appendChild(overlay);
+}
+
+function hideDragOverlay() {
+  const overlay = document.getElementById('drag-overlay');
+  if (overlay) overlay.remove();
+}
 
 // Переключение анимации печати
 typewriterToggle.addEventListener('click', () => {
