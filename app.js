@@ -271,14 +271,25 @@ function getReconnectDelay() {
   return delay;
 }
 
+// Макс попыток peer.reconnect() перед полной переинициализацией
+const MAX_RECONNECT_BEFORE_REINIT = 3;
+
 function scheduleSignalingReconnect() {
   if (peer.destroyed) return;
   if (reconnectTimer) clearTimeout(reconnectTimer);
 
-  const delay = getReconnectDelay();
   reconnectAttempts++;
-  dlog('signaling reconnect in ' + (delay / 1000) + 's (attempt ' + reconnectAttempts + ')', 'warn');
-  setStatus('signaling переподключение... (' + reconnectAttempts + ')');
+
+  // После 3 неудачных reconnect — полная переинициализация
+  if (reconnectAttempts > MAX_RECONNECT_BEFORE_REINIT) {
+    dlog('reconnect не помог (' + MAX_RECONNECT_BEFORE_REINIT + ' попыток), полная переинициализация', 'warn');
+    reinitPeer();
+    return;
+  }
+
+  const delay = getReconnectDelay();
+  dlog('signaling reconnect in ' + (delay / 1000) + 's (attempt ' + reconnectAttempts + '/' + MAX_RECONNECT_BEFORE_REINIT + ')', 'warn');
+  setStatus('signaling переподключение... (' + reconnectAttempts + '/' + MAX_RECONNECT_BEFORE_REINIT + ')');
 
   reconnectTimer = setTimeout(() => {
     if (!peer.destroyed && !peer.open) {
@@ -286,6 +297,30 @@ function scheduleSignalingReconnect() {
       peer.reconnect();
     }
   }, delay);
+}
+
+// Полная переинициализация peer (при смене сети и т.д.)
+function reinitPeer() {
+  resetReconnectState();
+  peerRetries = 0;
+  const oldPeerId = peer ? peer.id : null;
+
+  // Уничтожаем старый peer
+  if (peer && !peer.destroyed) {
+    try { peer.destroy(); } catch (e) {}
+  }
+
+  // Определяем с каким ID переподключаться
+  if (isHost && roomId) {
+    dlog('reinit: переинициализация как хост ' + roomId, 'warn');
+    setSignalingStatus('reconnecting');
+    initPeer(roomId, onOpenAsHost);
+  } else {
+    const newId = myNickname + '-' + Math.random().toString(16).substring(2, 4);
+    dlog('reinit: переинициализация как ' + newId, 'warn');
+    setSignalingStatus('reconnecting');
+    initPeer(newId);
+  }
 }
 
 function resetReconnectState() {
@@ -400,7 +435,15 @@ function createRoom() {
 
 function connectToPeer(remotePeerId) {
   const id = remotePeerId.trim();
-  if (!id || connections.has(id)) return;
+  if (!id) { dlog('connectToPeer: пустой ID', 'warn'); return; }
+  if (connections.has(id)) { dlog('connectToPeer: уже подключён к ' + id, 'warn'); return; }
+  if (!peer || !peer.open) {
+    dlog('connectToPeer: signaling не подключён, невозможно соединиться', 'error');
+    setStatus('signaling не подключён');
+    return;
+  }
+  dlog('connectToPeer: подключаюсь к ' + id);
+  setStatus('подключение к ' + id + '...');
   const conn = peer.connect(id, { reliable: true });
   handleConnection(conn);
 }
@@ -1179,6 +1222,35 @@ if (lockIcon) {
 window.addEventListener('beforeunload', () => {
   for (const [, entry] of connections) entry.conn.close();
   if (peer) peer.destroy();
+});
+
+// --- Обработка смены сети (mobile → WiFi, WiFi → mobile) ---
+window.addEventListener('online', () => {
+  dlog('network: online event — сеть вернулась', 'ok');
+  if (peer && !peer.open && !peer.destroyed) {
+    dlog('network: peer не подключён, переинициализация...', 'warn');
+    reinitPeer();
+  }
+});
+
+window.addEventListener('offline', () => {
+  dlog('network: offline event — сеть потеряна', 'error');
+  setSignalingStatus('offline');
+  setStatus('нет сети');
+});
+
+// --- Возврат на вкладку (сворачивание телефона) ---
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    dlog('visibility: вкладка активна', 'info');
+    // Проверяем состояние signaling
+    if (peer && !peer.destroyed && !peer.open) {
+      dlog('visibility: signaling отвалился, переинициализация', 'warn');
+      reinitPeer();
+    } else if (peer && peer.open) {
+      setSignalingStatus('online');
+    }
+  }
 });
 
 // --- Старт (async для генерации ключей) ---
