@@ -4,14 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ghost Mesh Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="app">
     <!-- Шапка -->
     <header id="header">
-      <span class="logo">ghost-mesh&gt;_</span>
-      <span id="my-id" class="my-id">connecting...</span>
+      <span class="logo">ghost-mesh<span class="cursor">_</span></span>
+      <div class="header-right">
+        <button id="typewriter-toggle" class="icon-btn" title="анимация текста">▸ anim</button>
+        <span id="my-id" class="my-id">connecting...</span>
+      </div>
     </header>
 
     <!-- Экран подключения -->
@@ -41,7 +47,7 @@
           <span id="invite-link" class="copyable">...</span>
           <button id="copy-link-btn">copy</button>
         </div>
-        <p class="hint">ожидание подключения...</p>
+        <p class="hint waiting-dots">ожидание подключения</p>
       </div>
     </div>
 
@@ -52,6 +58,14 @@
         <span id="online-count">0 online</span>
       </div>
       <div id="messages"></div>
+      <div id="typing-indicator" class="hidden">
+        <span class="typing-dots">
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+        </span>
+        <span id="typing-nick"></span>
+      </div>
       <div id="chat-input-row">
         <input type="text" id="msg-input" placeholder="> сообщение..." spellcheck="false" autocomplete="off">
         <button id="send-btn">send</button>

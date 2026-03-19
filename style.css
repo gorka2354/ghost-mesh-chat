@@ -1,4 +1,4 @@
-/* === Ghost Mesh Chat — CMD-стиль === */
+/* === Ghost Mesh Chat — Obsidian + CMD + Pixel Art === */
 
 * {
   margin: 0;
@@ -7,21 +7,21 @@
 }
 
 :root {
-  --bg: #0c0c0c;
-  --bg-light: #1a1a1a;
-  --green: #00ff41;
-  --green-dim: #00aa2a;
-  --gray: #666;
-  --text: #cccccc;
-  --white: #f0f0f0;
-  --font: 'Consolas', 'Courier New', monospace;
+  --bg: #1a1b26;
+  --bg-card: #24283b;
+  --text: #e8d4b8;
+  --accent: #d4a574;
+  --muted: #565f89;
+  --green: #9ece6a;
+  --border: #3b4261;
+  --font: 'JetBrains Mono', 'IBM Plex Mono', 'Consolas', monospace;
 }
 
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: 13px;
   height: 100vh;
   overflow: hidden;
 }
@@ -40,18 +40,57 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 10px 16px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
 }
 
 .logo {
-  color: var(--green);
-  font-size: 16px;
-  font-weight: bold;
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.cursor {
+  animation: blink 1s step-end infinite;
+  color: var(--accent);
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .my-id {
-  color: var(--gray);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.icon-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.icon-btn.active {
+  border-color: var(--green);
+  color: var(--green);
 }
 
 /* --- Экран подключения --- */
@@ -73,14 +112,14 @@ body {
 }
 
 .prompt {
-  color: var(--green-dim);
-  font-size: 14px;
+  color: var(--accent);
+  font-size: 13px;
   text-align: center;
 }
 
 .prompt-small {
-  color: var(--gray);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .connect-row {
@@ -93,7 +132,7 @@ body {
   align-items: center;
   gap: 12px;
   width: 100%;
-  color: #333;
+  color: var(--border);
   font-size: 11px;
   margin: 4px 0;
 }
@@ -103,23 +142,96 @@ body {
   content: '';
   flex: 1;
   height: 1px;
-  background: #333;
+  background: var(--border);
 }
 
 .hint {
-  color: var(--gray);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
   margin-top: 8px;
 }
 
+.waiting-dots::after {
+  content: '';
+  animation: dots 1.5s steps(3, end) infinite;
+}
+
+@keyframes dots {
+  0% { content: ''; }
+  33% { content: '.'; }
+  66% { content: '..'; }
+  100% { content: '...'; }
+}
+
 .copyable {
-  color: var(--green);
+  color: var(--accent);
   cursor: pointer;
-  border-bottom: 1px dashed var(--green-dim);
+  border-bottom: 1px dashed var(--muted);
+  transition: color 0.2s;
 }
 
 .copyable:hover {
-  color: var(--white);
+  color: var(--text);
+}
+
+/* --- Кнопка создания комнаты --- */
+.btn-primary {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 10px 24px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.btn-primary:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* --- Общие инпуты и кнопки --- */
+input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 8px 12px;
+  outline: none;
+  border-radius: 4px;
+  transition: border-color 0.2s;
+}
+
+input[type="text"]:focus {
+  border-color: var(--accent);
+}
+
+input[type="text"]::placeholder {
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 8px 16px;
+  cursor: pointer;
+  text-transform: uppercase;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+button:hover {
+  background: var(--accent);
+  color: var(--bg);
 }
 
 /* --- Экран комнаты (ожидание) --- */
@@ -146,63 +258,10 @@ body {
 }
 
 .invite-link-row .copyable {
-  font-size: 13px;
+  font-size: 12px;
   word-break: break-all;
   max-width: 400px;
   text-align: center;
-}
-
-/* --- Кнопка создания комнаты --- */
-.btn-primary {
-  background: transparent;
-  border: 1px solid var(--green);
-  color: var(--green);
-  font-family: var(--font);
-  font-size: 14px;
-  padding: 10px 24px;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-}
-
-.btn-primary:hover {
-  background: var(--green);
-  color: var(--bg);
-}
-
-/* --- Общие инпуты и кнопки --- */
-input[type="text"] {
-  background: var(--bg-light);
-  border: 1px solid #333;
-  color: var(--green);
-  font-family: var(--font);
-  font-size: 14px;
-  padding: 8px 12px;
-  outline: none;
-}
-
-input[type="text"]:focus {
-  border-color: var(--green-dim);
-}
-
-input[type="text"]::placeholder {
-  color: #444;
-}
-
-button {
-  background: transparent;
-  border: 1px solid var(--green-dim);
-  color: var(--green);
-  font-family: var(--font);
-  font-size: 13px;
-  padding: 8px 16px;
-  cursor: pointer;
-  text-transform: uppercase;
-}
-
-button:hover {
-  background: var(--green-dim);
-  color: var(--bg);
 }
 
 /* --- Заголовок чата --- */
@@ -211,16 +270,17 @@ button:hover {
   justify-content: space-between;
   align-items: center;
   padding: 8px 16px;
-  border-bottom: 1px solid #222;
-  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+  font-size: 11px;
 }
 
 #room-id-display {
-  color: var(--green-dim);
+  color: var(--accent);
 }
 
 #online-count {
-  color: var(--gray);
+  color: var(--green);
 }
 
 /* --- Экран чата --- */
@@ -237,37 +297,131 @@ button:hover {
   padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
+/* --- Сообщение (стиль коммита) --- */
 .msg {
-  line-height: 1.5;
-  word-wrap: break-word;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-card);
+  border-radius: 0 4px 4px 0;
+  animation: msgAppear 0.2s ease-out;
+}
+
+@keyframes msgAppear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.msg-avatar {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  image-rendering: pixelated;
+  border-radius: 2px;
+}
+
+.msg-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.msg-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
 }
 
 .msg .author {
-  color: var(--green-dim);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .msg .author.me {
-  color: var(--green);
+  color: var(--accent);
+}
+
+.msg .time {
+  color: var(--border);
+  font-size: 10px;
 }
 
 .msg .text {
   color: var(--text);
+  line-height: 1.5;
+  word-wrap: break-word;
 }
 
+/* --- Системное сообщение --- */
 .msg-system {
-  color: var(--gray);
-  font-style: italic;
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 12px;
+  animation: msgAppear 0.2s ease-out;
+}
+
+/* --- Индикатор "печатает" --- */
+#typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  opacity: 0;
+  transition: opacity 0.3s;
+  font-size: 11px;
+}
+
+#typing-indicator:not(.hidden) {
+  opacity: 1;
+}
+
+.typing-dots {
+  display: flex;
+  gap: 3px;
+}
+
+.typing-dot {
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+  animation: typingWave 1.2s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typingWave {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+#typing-nick {
+  color: var(--text);
 }
 
 /* --- Ввод сообщений --- */
 #chat-input-row {
   display: flex;
   gap: 0;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
 }
 
 #chat-input-row input {
@@ -275,20 +429,27 @@ button:hover {
   border: none;
   border-radius: 0;
   padding: 12px 16px;
+  background: var(--bg-card);
+}
+
+#chat-input-row input:focus {
+  border-color: transparent;
 }
 
 #chat-input-row button {
   border: none;
-  border-left: 1px solid #222;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
   padding: 12px 20px;
 }
 
 /* --- Статус-бар --- */
 #status-bar {
   padding: 6px 16px;
-  border-top: 1px solid #222;
-  font-size: 11px;
-  color: var(--gray);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--bg-card);
 }
 
 /* --- Утилиты --- */
@@ -306,7 +467,8 @@ button:hover {
 }
 
 #messages::-webkit-scrollbar-thumb {
-  background: #333;
+  background: var(--border);
+  border-radius: 2px;
 }
 
 /* --- Адаптив --- */
@@ -320,11 +482,21 @@ button:hover {
   }
 
   #peer-id-input {
-    width: 160px;
+    width: 150px;
   }
 
   .invite-link-row .copyable {
-    max-width: 240px;
-    font-size: 11px;
+    max-width: 220px;
+    font-size: 10px;
+  }
+
+  .msg {
+    padding: 6px 10px;
+    gap: 8px;
+  }
+
+  .msg-avatar {
+    width: 20px;
+    height: 20px;
   }
 }
