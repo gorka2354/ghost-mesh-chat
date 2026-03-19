@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ghost Mesh Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Шапка -->
+    <header id="header">
+      <span class="logo">ghost-mesh&gt;_</span>
+      <span id="my-id" class="my-id">connecting...</span>
+    </header>
+
+    <!-- Экран подключения -->
+    <div id="connect-screen">
+      <div class="connect-section">
+        <p class="prompt">&gt; создай комнату или подключись к существующей</p>
+
+        <button id="create-room-btn" class="btn-primary">create room</button>
+
+        <div class="divider"><span>или</span></div>
+
+        <p class="prompt-small">&gt; введи ID собеседника:</p>
+        <div class="connect-row">
+          <input type="text" id="peer-id-input" placeholder="ghost-XXXX" spellcheck="false" autocomplete="off">
+          <button id="connect-btn">connect</button>
+        </div>
+      </div>
+
+      <p class="hint">твой ID: <span id="my-id-copy" class="copyable">...</span></p>
+    </div>
+
+    <!-- Экран комнаты (ожидание) -->
+    <div id="room-screen" class="hidden">
+      <div class="room-info">
+        <p class="prompt">&gt; комната создана. отправь ссылку собеседнику:</p>
+        <div class="invite-link-row">
+          <span id="invite-link" class="copyable">...</span>
+          <button id="copy-link-btn">copy</button>
+        </div>
+        <p class="hint">ожидание подключения...</p>
+      </div>
+    </div>
+
+    <!-- Экран чата -->
+    <div id="chat-screen" class="hidden">
+      <div id="chat-header">
+        <span id="room-id-display"></span>
+        <span id="online-count">0 online</span>
+      </div>
+      <div id="messages"></div>
+      <div id="chat-input-row">
+        <input type="text" id="msg-input" placeholder="> сообщение..." spellcheck="false" autocomplete="off">
+        <button id="send-btn">send</button>
+      </div>
+    </div>
+
+    <!-- Статус-бар -->
+    <footer id="status-bar">
+      <span id="status">[ offline ]</span>
+    </footer>
+  </div>
+
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
