@@ -505,6 +505,12 @@ async function handleDecryptedMessage(conn, parsed) {
     return;
   }
 
+  if (parsed.type === 'voice') {
+    addVoiceMessage(parsed.nickname, parsed.audio, parsed.duration, false, parsed.mimeType);
+    playNotificationSound();
+    return;
+  }
+
   if (parsed.type === 'file-meta') {
     incomingFiles.set(parsed.transferId, {
       meta: parsed, chunks: [], received: 0, progressEl: null
@@ -587,6 +593,180 @@ function onTyping() {
   if (typingTimeout) return;
   broadcastEncrypted({ type: 'typing', nickname: myNickname });
   typingTimeout = setTimeout(() => { typingTimeout = null; }, 1000);
+}
+
+// --- Голосовые сообщения ---
+let mediaRecorder = null;
+let audioChunks = [];
+let recordingStartTime = 0;
+const voiceBtn = document.getElementById('voice-btn');
+
+// Начать/остановить запись
+voiceBtn.addEventListener('click', async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    // Остановить запись
+    mediaRecorder.stop();
+    voiceBtn.classList.remove('recording');
+    return;
+  }
+
+  // Начать запись
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Выбираем формат: webm для Chrome/Firefox, mp4 для Safari
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/mp4';
+    mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType });
+    audioChunks = [];
+    recordingStartTime = Date.now();
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      const duration = Math.round((Date.now() - recordingStartTime) / 1000);
+      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+      // Останавливаем доступ к микрофону
+      stream.getTracks().forEach(t => t.stop());
+
+      // Конвертируем в base64 и отправляем
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result.split(',')[1];
+        broadcastEncrypted({
+          type: 'voice',
+          nickname: myNickname,
+          audio: base64,
+          duration: duration,
+          mimeType: mediaRecorder.mimeType
+        });
+        addVoiceMessage(myNickname, base64, duration, true, mediaRecorder.mimeType);
+      };
+      reader.readAsDataURL(blob);
+    };
+
+    mediaRecorder.start();
+    voiceBtn.classList.add('recording');
+    dlog('recording started, mime=' + mimeType, 'ok');
+  } catch (e) {
+    dlog('mic error: ' + e.message, 'error');
+    addSystemMessage('нет доступа к микрофону');
+  }
+});
+
+// Отображение голосового сообщения
+function addVoiceMessage(author, base64Audio, duration, isMe, mimeType) {
+  const div = document.createElement('div');
+  div.className = 'msg';
+
+  const avatar = document.createElement('img');
+  avatar.className = 'msg-avatar';
+  avatar.src = generateAvatar(author);
+  avatar.alt = author;
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+
+  const header = document.createElement('div');
+  header.className = 'msg-header';
+  header.innerHTML =
+    '<span class="author ' + (isMe ? 'me' : '') + '">' + escapeHtml(author) + '</span>' +
+    '<span class="time">' + getTimeString() + '</span>';
+
+  // Карточка голосового
+  const voiceCard = document.createElement('div');
+  voiceCard.className = 'voice-card';
+
+  // Кнопка play/pause
+  const playBtn = document.createElement('button');
+  playBtn.className = 'voice-play-btn';
+  playBtn.textContent = '▶';
+
+  // Визуальная волна (генерируем из длительности)
+  const waveform = document.createElement('div');
+  waveform.className = 'voice-waveform';
+  const barCount = Math.min(Math.max(8, duration * 4), 32);
+  const bars = [];
+  for (let i = 0; i < barCount; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'voice-bar';
+    // Псевдослучайная высота из хэша
+    const h = 6 + Math.abs(Math.sin(i * 1.7 + duration) * 18);
+    bar.style.height = h + 'px';
+    waveform.appendChild(bar);
+    bars.push(bar);
+  }
+
+  // Длительность
+  const durEl = document.createElement('span');
+  durEl.className = 'voice-duration';
+  durEl.textContent = formatDuration(duration);
+
+  voiceCard.appendChild(playBtn);
+  voiceCard.appendChild(waveform);
+  voiceCard.appendChild(durEl);
+
+  // Воспроизведение
+  let audio = null;
+  let isPlaying = false;
+
+  playBtn.addEventListener('click', () => {
+    if (isPlaying && audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      playBtn.textContent = '▶';
+      isPlaying = false;
+      bars.forEach(b => b.classList.remove('active'));
+      return;
+    }
+
+    // Определяем mimeType
+    const type = mimeType || 'audio/webm;codecs=opus';
+    const byteChars = atob(base64Audio);
+    const byteArray = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteArray[i] = byteChars.charCodeAt(i);
+    }
+    const blob = new Blob([byteArray], { type: type });
+    const url = URL.createObjectURL(blob);
+
+    audio = new Audio(url);
+    audio.play();
+    isPlaying = true;
+    playBtn.textContent = '⏸';
+
+    // Анимация волны при воспроизведении
+    const animInterval = setInterval(() => {
+      if (!isPlaying) { clearInterval(animInterval); return; }
+      const progress = audio.currentTime / audio.duration;
+      const activeIdx = Math.floor(progress * bars.length);
+      bars.forEach((b, i) => {
+        b.classList.toggle('active', i <= activeIdx);
+      });
+    }, 100);
+
+    audio.onended = () => {
+      playBtn.textContent = '▶';
+      isPlaying = false;
+      bars.forEach(b => b.classList.remove('active'));
+      clearInterval(animInterval);
+    };
+  });
+
+  body.appendChild(header);
+  body.appendChild(voiceCard);
+  div.appendChild(avatar);
+  div.appendChild(body);
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function formatDuration(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m + ':' + (s < 10 ? '0' : '') + s;
 }
 
 // --- Счётчик онлайн ---
