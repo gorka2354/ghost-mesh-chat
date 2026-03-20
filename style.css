@@ -212,6 +212,43 @@ body {
   color: var(--bg);
 }
 
+/* Кнопка возврата в комнату */
+.rejoin-section { text-align: center; }
+
+.btn-rejoin {
+  background: transparent;
+  border: 1px solid var(--green);
+  color: var(--green);
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 10px 24px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  width: 100%;
+}
+.btn-rejoin:hover {
+  background: var(--green);
+  color: var(--bg);
+}
+
+.btn-mini {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 1px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.2s;
+}
+.btn-mini:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* --- Общие инпуты и кнопки --- */
 input[type="text"] {
   background: var(--bg);

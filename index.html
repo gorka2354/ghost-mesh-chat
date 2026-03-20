@@ -55,7 +55,13 @@
         </div>
       </div>
 
-      <p class="hint">твой ID: <span id="my-id-copy" class="copyable">...</span></p>
+      <div id="rejoin-section" class="rejoin-section hidden">
+        <div class="divider"><span>или</span></div>
+        <p class="prompt-small">&gt; вернуться в предыдущую комнату:</p>
+        <button id="rejoin-btn" class="btn-rejoin">rejoin <span id="rejoin-room-id"></span></button>
+      </div>
+
+      <p class="hint">твой ID: <span id="my-id-copy" class="copyable">...</span> <button id="new-id-btn" class="btn-mini" title="сменить ID">↻</button></p>
     </div>
 
     <!-- Экран комнаты (ожидание) -->

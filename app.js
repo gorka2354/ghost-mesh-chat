@@ -65,11 +65,28 @@ function generateRoomId() {
   return 'room-' + hex;
 }
 
+// Загружаем никнейм из localStorage или генерируем новый
+function loadOrCreateNickname() {
+  try {
+    const saved = localStorage.getItem('ghost-nickname');
+    if (saved) return saved;
+  } catch (e) {}
+  const nick = generateId();
+  try { localStorage.setItem('ghost-nickname', nick); } catch (e) {}
+  return nick;
+}
+
+function resetNickname() {
+  const nick = generateId();
+  try { localStorage.setItem('ghost-nickname', nick); } catch (e) {}
+  return nick;
+}
+
 // --- Состояние ---
 let peer = null;
 let isHost = false;
 let roomId = null;
-const myNickname = generateId();
+let myNickname = loadOrCreateNickname();
 // peerId -> { conn, nickname, sharedKey (CryptoKey), publicKeyRaw }
 const connections = new Map();
 
@@ -242,6 +259,85 @@ function checkInviteLink() {
   const hash = window.location.hash.substring(1);
   if (hash && hash.startsWith('room-')) return hash;
   return null;
+}
+
+// --- Session persistence (localStorage) ---
+// Два режима: room (комната, 3+) и direct (прямой чат, 1 на 1)
+function saveSession() {
+  try {
+    const data = { mode: null, roomId: null, isHost: false, peers: [] };
+
+    if (roomId) {
+      // Комната
+      data.mode = 'room';
+      data.roomId = roomId;
+      data.isHost = isHost;
+    } else if (connections.size > 0) {
+      // Прямой чат — сохраняем ID собеседников
+      data.mode = 'direct';
+      data.peers = [];
+      for (const [peerId] of connections) {
+        data.peers.push(peerId);
+      }
+    } else {
+      return; // нечего сохранять
+    }
+
+    localStorage.setItem('ghost-session', JSON.stringify(data));
+    dlog('session saved: mode=' + data.mode + (data.roomId ? ' room=' + data.roomId : ' peers=' + data.peers.join(',')));
+  } catch (e) {}
+}
+
+function loadSession() {
+  try {
+    const data = localStorage.getItem('ghost-session');
+    if (!data) return null;
+    return JSON.parse(data);
+  } catch (e) { return null; }
+}
+
+function clearSession() {
+  try { localStorage.removeItem('ghost-session'); } catch (e) {}
+}
+
+function showRejoinOption(session) {
+  const rejoinSection = document.getElementById('rejoin-section');
+  const rejoinRoomId = document.getElementById('rejoin-room-id');
+  const rejoinBtn = document.getElementById('rejoin-btn');
+  if (!rejoinSection || !rejoinBtn) return;
+
+  // Показываем что именно будем rejoin
+  if (session.mode === 'room') {
+    rejoinRoomId.textContent = session.roomId;
+  } else {
+    rejoinRoomId.textContent = session.peers.join(', ');
+  }
+  rejoinSection.classList.remove('hidden');
+
+  rejoinBtn.addEventListener('click', () => {
+    rejoinSection.classList.add('hidden');
+
+    if (session.mode === 'room' && session.isHost) {
+      // Хост комнаты — перерегистрируемся с тем же room ID
+      roomId = session.roomId;
+      isHost = true;
+      dlog('rejoin: переподключение как хост ' + roomId);
+      if (peer && !peer.destroyed) peer.destroy();
+      initPeer(roomId, () => { onOpenAsHost(); saveSession(); });
+    } else if (session.mode === 'room') {
+      // Гость комнаты — подключаемся к комнате
+      roomId = session.roomId;
+      dlog('rejoin: подключение к комнате ' + roomId);
+      saveSession();
+      connectToRoom(roomId);
+    } else {
+      // Прямой чат — подключаемся к каждому сохранённому пиру
+      dlog('rejoin: подключение к пирам: ' + session.peers.join(', '));
+      for (const peerId of session.peers) {
+        connectToPeer(peerId);
+      }
+    }
+  });
 }
 
 // --- Переключение на экран чата ---
@@ -468,7 +564,7 @@ function createRoom() {
   roomId = generateRoomId();
   isHost = true;
   peer.destroy();
-  initPeer(roomId, onOpenAsHost);
+  initPeer(roomId, () => { onOpenAsHost(); saveSession(); });
 }
 
 function connectToPeer(remotePeerId) {
@@ -557,48 +653,71 @@ function handlePong(peerId) {
 }
 
 // --- Грейс-период и reconnect к пиру ---
+// Грейс привязан к НИКНЕЙМУ, а не peer ID — при rejoin peer ID может измениться
 function startPeerGrace(peerId, nickname, publicKeyRaw) {
+  const graceKey = nickname || peerId;
   // Уже в грейсе — не дублируем
-  if (peerGraceTimers.has(peerId)) return;
+  if (peerGraceTimers.has(graceKey)) return;
 
-  const graceInfo = { reconnectCount: 0, nickname: nickname, publicKeyRaw: publicKeyRaw, timer: null };
-  peerGraceTimers.set(peerId, graceInfo);
+  const graceInfo = { reconnectCount: 0, nickname: nickname, peerId: peerId, publicKeyRaw: publicKeyRaw, timer: null };
+  peerGraceTimers.set(graceKey, graceInfo);
 
-  dlog('grace: ' + (nickname || peerId) + ' — ждём реконнект (' + (PEER_GRACE_PERIOD / 1000) + 's)', 'warn');
+  dlog('grace: ' + graceKey + ' — ждём реконнект (' + (PEER_GRACE_PERIOD / 1000) + 's)', 'warn');
   updateOnlineCount();
 
-  // Пробуем переподключиться
-  attemptPeerReconnect(peerId, graceInfo);
+  // Пробуем переподключиться к последнему известному peer ID
+  attemptPeerReconnect(graceKey, graceInfo);
 
-  // Таймер грейс-периода — если за 30 сек не восстановилось, считаем отключённым
+  // Таймер грейс-периода
   graceInfo.timer = setTimeout(() => {
-    if (peerGraceTimers.has(peerId)) {
-      peerGraceTimers.delete(peerId);
-      dlog('grace: ' + (nickname || peerId) + ' — грейс истёк, отключён', 'error');
-      addSystemMessage((nickname || peerId) + ' отключился');
+    if (peerGraceTimers.has(graceKey)) {
+      peerGraceTimers.delete(graceKey);
+      dlog('grace: ' + graceKey + ' — грейс истёк, отключён', 'error');
+      addSystemMessage(graceKey + ' отключился');
       updateOnlineCount();
       updateLockIcon();
     }
   }, PEER_GRACE_PERIOD);
 }
 
-function attemptPeerReconnect(peerId, graceInfo) {
-  if (!peerGraceTimers.has(peerId)) return;
+function attemptPeerReconnect(graceKey, graceInfo) {
+  if (!peerGraceTimers.has(graceKey)) return;
   if (!peer || !peer.open) return;
   if (graceInfo.reconnectCount >= MAX_PEER_RECONNECT) return;
 
   graceInfo.reconnectCount++;
-  dlog('peer reconnect: ' + (graceInfo.nickname || peerId) + ' попытка ' + graceInfo.reconnectCount + '/' + MAX_PEER_RECONNECT);
+  dlog('peer reconnect: ' + graceKey + ' попытка ' + graceInfo.reconnectCount + '/' + MAX_PEER_RECONNECT);
 
-  const conn = peer.connect(peerId, { reliable: true });
+  const conn = peer.connect(graceInfo.peerId, { reliable: true });
   handleConnection(conn, graceInfo);
 }
 
+// Отмена грейса по никнейму
+function cancelGraceByNickname(nickname) {
+  if (!nickname) return;
+  const grace = peerGraceTimers.get(nickname);
+  if (grace) {
+    if (grace.timer) clearTimeout(grace.timer);
+    peerGraceTimers.delete(nickname);
+    dlog('grace cancelled for ' + nickname, 'ok');
+  }
+}
+
 function cancelPeerGrace(peerId) {
+  // Пробуем отменить и по peerId, и ищем по никнейму
   const grace = peerGraceTimers.get(peerId);
   if (grace) {
     if (grace.timer) clearTimeout(grace.timer);
     peerGraceTimers.delete(peerId);
+    return;
+  }
+  // Поиск по peerId внутри graceInfo
+  for (const [key, info] of peerGraceTimers) {
+    if (info.peerId === peerId) {
+      if (info.timer) clearTimeout(info.timer);
+      peerGraceTimers.delete(key);
+      return;
+    }
   }
 }
 
@@ -606,11 +725,14 @@ function cancelPeerGrace(peerId) {
 function checkAllConnections() {
   for (const [peerId, entry] of connections) {
     if (!entry.conn.open) {
-      dlog('check: DataChannel с ' + (entry.nickname || peerId) + ' мёртв', 'warn');
       const nickname = entry.nickname;
+      const graceKey = nickname || peerId;
+      dlog('check: DataChannel с ' + graceKey + ' мёртв', 'warn');
       const pubKey = entry.publicKeyRaw;
       connections.delete(peerId);
-      startPeerGrace(peerId, nickname, pubKey);
+      if (!peerGraceTimers.has(graceKey)) {
+        startPeerGrace(peerId, nickname, pubKey);
+      }
     }
   }
 }
@@ -644,6 +766,7 @@ function handleConnection(conn, graceInfo) {
     showChat();
     startPingLoop();
     updateOnlineCount();
+    saveSession();
     setStatus('подключён — ' + connections.size + ' пир(ов)');
   });
 
@@ -682,20 +805,41 @@ function handleConnection(conn, graceInfo) {
       if (entry) {
         entry.nickname = parsed.nickname;
         entry.publicKeyRaw = parsed.publicKey;
+
+        // Проверяем — этот никнейм был в грейсе? (реконнект с новым peer ID)
+        const wasInGrace = peerGraceTimers.has(parsed.nickname);
+        if (wasInGrace) {
+          cancelGraceByNickname(parsed.nickname);
+        }
+
+        // Удаляем старое соединение с тем же никнеймом (другой peer ID)
+        for (const [oldPeerId, oldEntry] of connections) {
+          if (oldPeerId !== conn.peer && oldEntry.nickname === parsed.nickname) {
+            dlog('removing stale connection: ' + oldPeerId + ' (replaced by ' + conn.peer + ')');
+            try { oldEntry.conn.close(); } catch (e) {}
+            connections.delete(oldPeerId);
+          }
+        }
+
         // Вычисляем shared key
         if (parsed.publicKey) {
           try {
             entry.sharedKey = await deriveSharedKey(parsed.publicKey);
             const fp = getFingerprint(parsed.publicKey);
-            addSystemMessage(parsed.nickname + ' подключился 🔒 [' + fp + ']');
+            if (wasInGrace) {
+              addSystemMessage(parsed.nickname + ' переподключился 🔒 [' + fp + ']');
+            } else {
+              addSystemMessage(parsed.nickname + ' подключился 🔒 [' + fp + ']');
+            }
             updateLockIcon();
           } catch (e) {
-            addSystemMessage(parsed.nickname + ' подключился (без шифрования)');
+            addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
           }
         } else {
-          addSystemMessage(parsed.nickname + ' подключился (без шифрования)');
+          addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
         }
       }
+      saveSession();
       updateOnlineCount();
       return;
     }
@@ -730,10 +874,24 @@ function handleConnection(conn, graceInfo) {
     connections.delete(conn.peer);
     clearTypingTimer(conn.peer);
 
-    // Грейс-период — пробуем реконнект перед "отключился"
-    if (peer && peer.open && !peerGraceTimers.has(conn.peer)) {
+    // Грейс-ключ — по никнейму (если известен), иначе по peer ID
+    const graceKey = (entry && entry.nickname) || conn.peer;
+
+    // Если этот никнейм уже подключён через другой peer ID — не нужен грейс
+    let stillConnected = false;
+    if (entry && entry.nickname) {
+      for (const [, e] of connections) {
+        if (e.nickname === entry.nickname) { stillConnected = true; break; }
+      }
+    }
+
+    if (stillConnected) {
+      // Тот же никнейм подключён через другой peer ID — молча убираем старое
+      dlog('stale conn closed: ' + conn.peer + ' (nickname ' + name + ' still connected)', 'info');
+    } else if (peer && peer.open && !peerGraceTimers.has(graceKey)) {
+      // Грейс-период — пробуем реконнект
       startPeerGrace(conn.peer, name, pubKey);
-    } else if (!peerGraceTimers.has(conn.peer)) {
+    } else if (!peerGraceTimers.has(graceKey)) {
       // Signaling тоже мёртв — сразу отключаем
       addSystemMessage(name + ' отключился');
       updateOnlineCount();
@@ -744,7 +902,6 @@ function handleConnection(conn, graceInfo) {
       ? 'подключён — ' + connections.size + ' пир(ов)'
       : (peerGraceTimers.size > 0 ? 'переподключение...' : 'все отключились'));
 
-    // Если нет активных соединений и нет грейсов — остановить пинг
     if (connections.size === 0 && peerGraceTimers.size === 0) stopPingLoop();
   });
 
@@ -1321,6 +1478,18 @@ inviteLinkEl.addEventListener('click', () => {
   copyToClipboard(inviteLinkEl.textContent, inviteLinkEl);
 });
 
+// Смена ID
+document.getElementById('new-id-btn').addEventListener('click', () => {
+  myNickname = resetNickname();
+  myIdEl.textContent = myNickname;
+  myIdCopyEl.textContent = myNickname;
+  clearSession();
+  dlog('new identity: ' + myNickname, 'ok');
+  // Переинициализируем peer с новым ID
+  if (peer && !peer.destroyed) peer.destroy();
+  initPeer(myNickname);
+});
+
 // Отправка файлов
 const fileInput = document.getElementById('file-input');
 const fileBtn = document.getElementById('file-btn');
@@ -1468,13 +1637,22 @@ debugToggle.addEventListener('click', () => {
   }
 
   const inviteOnStart = checkInviteLink();
+  const savedSession = loadSession();
+
   if (inviteOnStart) {
+    // Приглашение по ссылке
     roomId = inviteOnStart;
     dlog('invite link detected: ' + inviteOnStart);
     initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4), () => {
       dlog('peer ready, connecting to room...');
+      saveSession();
       connectToRoom(inviteOnStart);
     });
+  } else if (savedSession && (savedSession.roomId || (savedSession.peers && savedSession.peers.length > 0))) {
+    // Есть сохранённая сессия — показать кнопку rejoin
+    dlog('saved session found: mode=' + savedSession.mode + (savedSession.roomId ? ' room=' + savedSession.roomId : ' peers=' + (savedSession.peers || []).join(',')));
+    showRejoinOption(savedSession);
+    initPeer(myNickname);
   } else {
     initPeer(myNickname);
   }
