@@ -450,10 +450,9 @@ function reinitPeer() {
     setSignalingStatus('reconnecting');
     initPeer(roomId, () => { onOpenAsHost(); onReconnected(); });
   } else {
-    const newId = myNickname + '-' + Math.random().toString(16).substring(2, 4);
-    dlog('reinit: переинициализация как ' + newId, 'warn');
+    dlog('reinit: переинициализация как ' + myNickname, 'warn');
     setSignalingStatus('reconnecting');
-    initPeer(newId, onReconnected);
+    initPeer(myNickname, onReconnected);
   }
 }
 
@@ -482,16 +481,19 @@ const PEER_CONFIG = {
 
 function initPeer(peerId, onOpen) {
   dlog('initPeer: id=' + peerId + ', retry=' + peerRetries);
-  peer = new Peer(peerId, PEER_CONFIG);
+  resetReconnectState();
+  const thisPeer = new Peer(peerId, PEER_CONFIG);
+  peer = thisPeer;
 
   // Таймаут подключения к signaling-серверу (10 сек)
   const connectTimeout = setTimeout(() => {
-    if (!peer.open && !peer.destroyed) {
+    if (peer !== thisPeer) return; // устаревший таймер
+    if (!thisPeer.open && !thisPeer.destroyed) {
       if (peerRetries < MAX_PEER_RETRIES) {
         peerRetries++;
         dlog('signaling timeout, retry ' + peerRetries, 'warn');
         setStatus('signaling не отвечает, повтор ' + peerRetries + '/' + MAX_PEER_RETRIES);
-        peer.destroy();
+        thisPeer.destroy();
         initPeer(peerId, onOpen);
       } else {
         dlog('signaling failed after ' + MAX_PEER_RETRIES + ' retries', 'error');
@@ -500,7 +502,8 @@ function initPeer(peerId, onOpen) {
     }
   }, 10000);
 
-  peer.on('open', (id) => {
+  thisPeer.on('open', (id) => {
+    if (peer !== thisPeer) return;
     clearTimeout(connectTimeout);
     peerRetries = 0;
     resetReconnectState();
@@ -512,16 +515,18 @@ function initPeer(peerId, onOpen) {
     if (onOpen) onOpen(id);
   });
 
-  peer.on('connection', (incoming) => {
+  thisPeer.on('connection', (incoming) => {
+    if (peer !== thisPeer) return;
     dlog('incoming connection from ' + incoming.peer);
     handleConnection(incoming);
   });
 
-  peer.on('error', (err) => {
+  thisPeer.on('error', (err) => {
+    if (peer !== thisPeer) return;
     clearTimeout(connectTimeout);
     dlog('peer.error: type=' + err.type + ' msg=' + err.message, 'error');
     if (err.type === 'unavailable-id') {
-      peer.destroy();
+      thisPeer.destroy();
       if (isHost) {
         roomId = generateRoomId();
         initPeer(roomId, onOpenAsHost);
@@ -537,15 +542,16 @@ function initPeer(peerId, onOpen) {
     setStatus('ошибка: ' + err.type);
   });
 
-  peer.on('disconnected', () => {
-    dlog('peer.disconnected (destroyed=' + peer.destroyed + ')', 'warn');
-    if (peer.destroyed) return;
+  thisPeer.on('disconnected', () => {
+    if (peer !== thisPeer) return; // событие от старого peer — игнорируем
+    dlog('peer.disconnected (destroyed=' + thisPeer.destroyed + ')', 'warn');
+    if (thisPeer.destroyed) return;
     setSignalingStatus('reconnecting');
     scheduleSignalingReconnect();
   });
 
-  // peer.on('close') — полное уничтожение, нужна переинициализация
-  peer.on('close', () => {
+  thisPeer.on('close', () => {
+    if (peer !== thisPeer) return; // событие от старого peer — игнорируем
     dlog('peer.close — полное отключение', 'error');
     setSignalingStatus('offline');
   });
@@ -1636,24 +1642,49 @@ debugToggle.addEventListener('click', () => {
     myPublicKeyJwk = null;
   }
 
-  const inviteOnStart = checkInviteLink();
+  const inviteHash = checkInviteLink();
   const savedSession = loadSession();
 
-  if (inviteOnStart) {
-    // Приглашение по ссылке
-    roomId = inviteOnStart;
-    dlog('invite link detected: ' + inviteOnStart);
-    initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4), () => {
-      dlog('peer ready, connecting to room...');
+  // Определяем режим старта
+  if (inviteHash && savedSession && savedSession.roomId === inviteHash && savedSession.isHost) {
+    // Хост перезагрузил страницу — перерегистрируемся с тем же room ID
+    roomId = inviteHash;
+    isHost = true;
+    dlog('restart as host: ' + roomId);
+    initPeer(roomId, () => { onOpenAsHost(); saveSession(); });
+
+  } else if (inviteHash && savedSession && savedSession.roomId === inviteHash) {
+    // Гость перезагрузил страницу — авто-подключение к комнате
+    roomId = inviteHash;
+    dlog('restart as guest: ' + roomId);
+    initPeer(myNickname, () => {
       saveSession();
-      connectToRoom(inviteOnStart);
+      connectToRoom(inviteHash);
     });
-  } else if (savedSession && (savedSession.roomId || (savedSession.peers && savedSession.peers.length > 0))) {
-    // Есть сохранённая сессия — показать кнопку rejoin
-    dlog('saved session found: mode=' + savedSession.mode + (savedSession.roomId ? ' room=' + savedSession.roomId : ' peers=' + (savedSession.peers || []).join(',')));
+
+  } else if (inviteHash) {
+    // Новое приглашение по ссылке (первый вход)
+    roomId = inviteHash;
+    dlog('invite link: ' + inviteHash);
+    initPeer(myNickname, () => {
+      saveSession();
+      connectToRoom(inviteHash);
+    });
+
+  } else if (savedSession && savedSession.mode === 'room' && savedSession.roomId) {
+    // Сохранённая сессия комнаты (без хеша в URL) — кнопка rejoin
+    dlog('saved session: room=' + savedSession.roomId + ' host=' + savedSession.isHost);
     showRejoinOption(savedSession);
     initPeer(myNickname);
+
+  } else if (savedSession && savedSession.mode === 'direct' && savedSession.peers && savedSession.peers.length > 0) {
+    // Сохранённая сессия прямого чата — кнопка rejoin
+    dlog('saved session: direct peers=' + savedSession.peers.join(','));
+    showRejoinOption(savedSession);
+    initPeer(myNickname);
+
   } else {
+    // Чистый старт
     initPeer(myNickname);
   }
 })();
@@ -1701,7 +1732,12 @@ function retryRoomConnect(roomPeerId) {
     setTimeout(() => connectToRoom(roomPeerId), delay);
   } else {
     dlog('room connect failed after ' + MAX_ROOM_RETRIES + ' attempts', 'error');
-    setStatus('не удалось подключиться к комнате');
-    addSystemMessage('комната не найдена. Возможно хост отключился или signaling сервер перезапустился.');
+    setStatus('комната не найдена');
+    clearSession();
+    // Возвращаем на главный экран
+    chatScreen.classList.add('hidden');
+    roomScreen.classList.add('hidden');
+    connectScreen.classList.remove('hidden');
+    window.history.replaceState(null, '', window.location.pathname);
   }
 }
