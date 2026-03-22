@@ -95,6 +95,134 @@ let typewriterEnabled = true;
 const FILE_MAX_SIZE = 50 * 1024 * 1024;
 const CHUNK_SIZE = 16000;
 
+// --- IndexedDB — локальное хранилище сообщений ---
+const DB_NAME = 'ghost-mesh-db';
+const DB_VERSION = 1;
+let db = null;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const database = e.target.result;
+      if (!database.objectStoreNames.contains('messages')) {
+        const store = database.createObjectStore('messages', { keyPath: 'msgId' });
+        store.createIndex('chatId', 'chatId', { unique: false });
+        store.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+    };
+    req.onsuccess = (e) => {
+      db = e.target.result;
+      dlog('IndexedDB opened', 'ok');
+      resolve(db);
+    };
+    req.onerror = (e) => {
+      dlog('IndexedDB error: ' + e.target.error, 'error');
+      reject(e.target.error);
+    };
+  });
+}
+
+// Генерация уникального ID сообщения
+function generateMsgId() {
+  return Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+}
+
+// Получить chatId — стабильный ключ для группировки сообщений
+// Используем currentChatId если уже определён, иначе вычисляем
+let currentChatId = null;
+
+function getChatId() {
+  if (currentChatId) return currentChatId;
+  if (roomId) return roomId;
+  return null;
+}
+
+// Установить chatId при получении hello (когда известен никнейм собеседника)
+function updateChatId() {
+  if (roomId) {
+    currentChatId = roomId;
+  } else {
+    // Для прямого чата — сортированные никнеймы
+    const nicks = [myNickname];
+    for (const [, entry] of connections) {
+      if (entry.nickname) nicks.push(entry.nickname);
+    }
+    nicks.sort();
+    currentChatId = 'dm:' + nicks.join(',');
+  }
+  dlog('chatId: ' + currentChatId);
+}
+
+// Сохранить сообщение в IndexedDB
+function saveMessageToDB(msg) {
+  if (!db || !msg.chatId) return;
+  try {
+    const tx = db.transaction('messages', 'readwrite');
+    tx.objectStore('messages').put(msg);
+  } catch (e) {
+    dlog('DB save error: ' + e.message, 'error');
+  }
+}
+
+// Загрузить историю чата из IndexedDB
+function loadHistory(chatId) {
+  if (!db) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('messages', 'readonly');
+      const store = tx.objectStore('messages');
+      const index = store.index('chatId');
+      const req = index.getAll(chatId);
+      req.onsuccess = () => {
+        const msgs = req.result || [];
+        // Сортируем по timestamp
+        msgs.sort((a, b) => a.timestamp - b.timestamp);
+        resolve(msgs);
+      };
+      req.onerror = () => resolve([]);
+    } catch (e) {
+      resolve([]);
+    }
+  });
+}
+
+// Отрисовка истории из IndexedDB (без typewriter, без звука)
+function renderHistory(messages) {
+  for (const msg of messages) {
+    if (msg.type === 'system') {
+      const div = document.createElement('div');
+      div.className = 'msg-system';
+      div.textContent = '> ' + msg.text + ' [' + msg.timeStr + ']';
+      messagesEl.appendChild(div);
+    } else if (msg.type === 'msg') {
+      const isMe = msg.author === myNickname;
+      const div = document.createElement('div');
+      div.className = 'msg';
+      const avatar = document.createElement('img');
+      avatar.className = 'msg-avatar';
+      avatar.src = generateAvatar(msg.author);
+      avatar.alt = msg.author;
+      const body = document.createElement('div');
+      body.className = 'msg-body';
+      const header = document.createElement('div');
+      header.className = 'msg-header';
+      header.innerHTML =
+        '<span class="author ' + (isMe ? 'me' : '') + '">' + escapeHtml(msg.author) + '</span>' +
+        '<span class="time">' + msg.timeStr + '</span>';
+      const textEl = document.createElement('span');
+      textEl.className = 'text';
+      textEl.textContent = msg.text;
+      body.appendChild(header);
+      body.appendChild(textEl);
+      div.appendChild(avatar);
+      div.appendChild(body);
+      messagesEl.appendChild(div);
+    }
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 // --- Ping/pong и peer reconnect ---
 const PING_INTERVAL = 15000;  // пинг каждые 15 сек
 const PONG_TIMEOUT = 5000;    // ждём pong 5 сек
@@ -316,6 +444,8 @@ function showRejoinOption(session) {
 
   rejoinBtn.addEventListener('click', () => {
     rejoinSection.classList.add('hidden');
+    historyLoaded = false;
+    currentChatId = null;
 
     if (session.mode === 'room' && session.isHost) {
       // Хост комнаты — перерегистрируемся с тем же room ID
@@ -341,6 +471,8 @@ function showRejoinOption(session) {
 }
 
 // --- Переключение на экран чата ---
+let historyLoaded = false;
+
 function showChat() {
   connectScreen.classList.add('hidden');
   roomScreen.classList.add('hidden');
@@ -350,6 +482,26 @@ function showChat() {
   } else {
     roomIdDisplay.textContent = '# direct';
   }
+}
+
+// Загрузка истории — вызывается после hello, когда chatId стабилен
+function loadChatHistory() {
+  if (historyLoaded) return;
+  const chatId = getChatId();
+  if (!chatId) return;
+  historyLoaded = true;
+
+  loadHistory(chatId).then(msgs => {
+    if (msgs.length > 0) {
+      dlog('history: loaded ' + msgs.length + ' messages for ' + chatId, 'ok');
+      // Вставляем историю ПЕРЕД текущими сообщениями
+      const existing = messagesEl.innerHTML;
+      messagesEl.innerHTML = '';
+      renderHistory(msgs);
+      messagesEl.insertAdjacentHTML('beforeend', existing);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+  });
   msgInput.focus();
 }
 
@@ -595,8 +747,10 @@ function onOpenAsHost() {
 function createRoom() {
   roomId = generateRoomId();
   isHost = true;
+  historyLoaded = false;
+  currentChatId = null;
   peer.destroy();
-  initPeer(roomId, () => { onOpenAsHost(); saveSession(); });
+  initPeer(roomId, () => { onOpenAsHost(); updateChatId(); saveSession(); });
 }
 
 function connectToPeer(remotePeerId) {
@@ -871,6 +1025,8 @@ function handleConnection(conn, graceInfo) {
           addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
         }
       }
+      updateChatId();
+      loadChatHistory();
       saveSession();
       updateOnlineCount();
       return;
@@ -1242,6 +1398,7 @@ function sendMessage() {
 
 // --- Отображение сообщений ---
 function addMessage(author, text, isMe = false) {
+  const timeStr = getTimeString();
   const div = document.createElement('div');
   div.className = 'msg';
 
@@ -1257,7 +1414,7 @@ function addMessage(author, text, isMe = false) {
   header.className = 'msg-header';
   header.innerHTML =
     '<span class="author ' + (isMe ? 'me' : '') + '">' + escapeHtml(author) + '</span>' +
-    '<span class="time">' + getTimeString() + '</span>';
+    '<span class="time">' + timeStr + '</span>';
 
   const textEl = document.createElement('span');
   textEl.className = 'text';
@@ -1276,14 +1433,37 @@ function addMessage(author, text, isMe = false) {
   } else {
     textEl.textContent = text;
   }
+
+  // Сохраняем в IndexedDB
+  saveMessageToDB({
+    msgId: generateMsgId(),
+    chatId: getChatId(),
+    type: 'msg',
+    author: author,
+    text: text,
+    timeStr: timeStr,
+    timestamp: Date.now()
+  });
 }
 
-function addSystemMessage(text) {
+function addSystemMessage(text, saveToDB = true) {
+  const timeStr = getTimeString();
   const div = document.createElement('div');
   div.className = 'msg-system';
-  div.textContent = '> ' + text + ' [' + getTimeString() + ']';
+  div.textContent = '> ' + text + ' [' + timeStr + ']';
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  if (saveToDB) {
+    saveMessageToDB({
+      msgId: generateMsgId(),
+      chatId: getChatId(),
+      type: 'system',
+      text: text,
+      timeStr: timeStr,
+      timestamp: Date.now()
+    });
+  }
 }
 
 // --- Передача файлов ---
@@ -1657,6 +1837,13 @@ debugToggle.addEventListener('click', () => {
   dlog('start: userAgent=' + navigator.userAgent);
   dlog('start: url=' + location.href);
 
+  // Открываем IndexedDB
+  try {
+    await openDB();
+  } catch (e) {
+    dlog('IndexedDB unavailable, history disabled', 'warn');
+  }
+
   try {
     setStatus('генерация ключей...');
     dlog('generating ECDH keys...');
@@ -1678,7 +1865,8 @@ debugToggle.addEventListener('click', () => {
     roomId = inviteHash;
     isHost = true;
     dlog('restart as host: ' + roomId);
-    initPeer(roomId, () => { onOpenAsHost(); saveSession(); });
+    updateChatId();
+    initPeer(roomId, () => { onOpenAsHost(); loadChatHistory(); saveSession(); });
 
   } else if (inviteHash && savedSession && savedSession.roomId === inviteHash) {
     // Гость перезагрузил страницу — авто-подключение к комнате
