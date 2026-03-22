@@ -465,8 +465,11 @@ function resetReconnectState() {
 }
 
 // Конфигурация PeerJS — свой signaling-сервер
+const SIGNAL_HOST = 'ghost-mesh-signal.onrender.com';
+const SIGNAL_URL = 'https://' + SIGNAL_HOST;
+
 const PEER_CONFIG = {
-  host: 'ghost-mesh-signal.onrender.com',
+  host: SIGNAL_HOST,
   port: 443,
   path: '/',
   secure: true,
@@ -478,6 +481,28 @@ const PEER_CONFIG = {
     ]
   }
 };
+
+// --- Keep-alive для signaling-сервера (не даём Render уснуть) ---
+const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000; // 10 минут
+let keepAliveTimer = null;
+
+function startKeepAlive() {
+  if (keepAliveTimer) return;
+  keepAliveTimer = setInterval(() => {
+    fetch(SIGNAL_URL + '/health')
+      .then(r => r.json())
+      .then(data => dlog('keep-alive: server uptime ' + Math.round(data.uptime) + 's', 'ok'))
+      .catch(() => dlog('keep-alive: signaling не отвечает', 'warn'));
+  }, KEEP_ALIVE_INTERVAL);
+  dlog('keep-alive started (every 10 min)');
+}
+
+function stopKeepAlive() {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
 
 function initPeer(peerId, onOpen) {
   dlog('initPeer: id=' + peerId + ', retry=' + peerRetries);
@@ -508,6 +533,7 @@ function initPeer(peerId, onOpen) {
     peerRetries = 0;
     resetReconnectState();
     setSignalingStatus('online');
+    startKeepAlive();
     dlog('peer.open: id=' + id, 'ok');
     myIdEl.textContent = myNickname;
     myIdCopyEl.textContent = myNickname;
@@ -1571,6 +1597,7 @@ if (lockIcon) {
 
 // Отключение при закрытии
 window.addEventListener('beforeunload', () => {
+  stopKeepAlive();
   for (const [, entry] of connections) entry.conn.close();
   if (peer) peer.destroy();
 });
