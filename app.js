@@ -471,7 +471,7 @@ const SIGNAL_URL = 'https://' + SIGNAL_HOST;
 const PEER_CONFIG = {
   host: SIGNAL_HOST,
   port: 443,
-  path: '/',
+  path: '/peerjs',
   secure: true,
   debug: 0,
   config: {
