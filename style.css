@@ -212,8 +212,8 @@ body {
   color: var(--bg);
 }
 
-/* Кнопка возврата в комнату */
-.rejoin-section { text-align: center; }
+/* Кнопка возврата в активный чат */
+.active-chat-section { text-align: center; width: 100%; max-width: 300px; }
 
 .btn-rejoin {
   background: transparent;
@@ -328,6 +328,23 @@ button:hover {
   border-bottom: 1px solid var(--border);
   background: var(--bg-card);
   font-size: 11px;
+}
+
+.back-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 2px 8px 2px 0;
+  cursor: pointer;
+  transition: color 0.2s;
+  text-transform: none;
+  border-radius: 0;
+}
+
+.back-btn:hover {
+  color: var(--accent);
+  background: transparent;
 }
 
 #room-id-display {

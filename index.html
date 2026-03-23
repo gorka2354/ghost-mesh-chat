@@ -55,10 +55,9 @@
         </div>
       </div>
 
-      <div id="rejoin-section" class="rejoin-section hidden">
-        <div class="divider"><span>или</span></div>
-        <p class="prompt-small">&gt; вернуться в предыдущую комнату:</p>
-        <button id="rejoin-btn" class="btn-rejoin">rejoin <span id="rejoin-room-id"></span></button>
+      <div id="active-chat-section" class="active-chat-section hidden">
+        <div class="divider"><span>активный чат</span></div>
+        <button id="return-chat-btn" class="btn-rejoin">вернуться в <span id="active-chat-name"></span></button>
       </div>
 
       <p class="hint">твой ID: <span id="my-id-copy" class="copyable">...</span> <button id="new-id-btn" class="btn-mini" title="сменить ID">↻</button></p>
@@ -79,6 +78,7 @@
     <!-- Экран чата -->
     <div id="chat-screen" class="hidden">
       <div id="chat-header">
+        <button id="back-btn" class="back-btn" title="назад">←</button>
         <span id="room-id-display"></span>
         <div class="chat-header-right">
           <span id="lock-icon" title="статус шифрования"></span>

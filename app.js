@@ -482,6 +482,40 @@ function showChat() {
   } else {
     roomIdDisplay.textContent = '# direct';
   }
+  // URL остаётся чистым — хеш только в invite-ссылке
+}
+
+// Выход из чата на главный экран (соединения остаются живыми)
+function leaveChat() {
+  chatScreen.classList.add('hidden');
+  roomScreen.classList.add('hidden');
+  connectScreen.classList.remove('hidden');
+  window.history.replaceState(null, '', window.location.pathname);
+  setStatus('online — главный экран');
+  dlog('leaveChat: вернулись на главный экран (соединения активны: ' + connections.size + ')');
+  showActiveChatButton();
+}
+
+// Показать кнопку возврата в активный чат
+function showActiveChatButton() {
+  const section = document.getElementById('active-chat-section');
+  const nameEl = document.getElementById('active-chat-name');
+  if (!section) return;
+
+  if (connections.size > 0 || peerGraceTimers.size > 0) {
+    const label = roomId ? '# ' + roomId : 'direct';
+    nameEl.textContent = label;
+    section.classList.remove('hidden');
+  } else {
+    section.classList.add('hidden');
+  }
+}
+
+// Вернуться в активный чат
+function returnToChat() {
+  const section = document.getElementById('active-chat-section');
+  if (section) section.classList.add('hidden');
+  showChat();
 }
 
 // Загрузка истории — вызывается после hello, когда chatId стабилен
@@ -1659,6 +1693,9 @@ function copyToClipboard(text, feedbackEl) {
 }
 
 // --- Обработчики событий ---
+
+document.getElementById('back-btn').addEventListener('click', leaveChat);
+document.getElementById('return-chat-btn').addEventListener('click', returnToChat);
 
 createRoomBtn.addEventListener('click', createRoom);
 
