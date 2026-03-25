@@ -527,11 +527,11 @@ function teardownChatSession() {
   updateOnlineCount();
   updateLockIcon();
 
-  // Автоочистка disconnectedPeers через 15 сек
+  // Автоочистка disconnectedPeers через 60 сек (дольше PEER_GRACE_PERIOD)
   disconnectedClearTimer = setTimeout(() => {
     disconnectedPeers.clear();
     disconnectedClearTimer = null;
-  }, 15000);
+  }, 60000);
 
   dlog('teardownChatSession: сессия очищена, blocked peers: ' + [...disconnectedPeers].join(', '));
 }
