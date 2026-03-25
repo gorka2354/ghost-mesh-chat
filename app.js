@@ -472,13 +472,26 @@ function showChat() {
   chatScreen.classList.remove('hidden');
   if (roomId) {
     roomIdDisplay.textContent = '# ' + roomId;
+  } else if (currentChatId && currentChatId.startsWith('dm:')) {
+    // Показываем никнейм собеседника из chatId
+    const nicks = currentChatId.replace('dm:', '').split(',');
+    const other = nicks.find(n => n !== myNickname) || 'direct';
+    roomIdDisplay.textContent = '@ ' + other;
   } else {
     roomIdDisplay.textContent = '# direct';
   }
   // URL остаётся чистым — хеш только в invite-ссылке
 }
 
-// Выход из чата на главный экран (соединения остаются живыми)
+// Управление доступностью input-области чата
+function setChatInputEnabled(enabled) {
+  msgInput.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+  voiceBtn.disabled = !enabled;
+  fileBtn.classList.toggle('disabled', !enabled);
+}
+
+// Выход из чата на главный экран
 // Пиры, от которых мы сознательно отключились (блокируем реконнект)
 const disconnectedPeers = new Set();
 let disconnectedClearTimer = null;
@@ -621,20 +634,28 @@ function formatRoomTime(ts) {
 function rejoinFromRoomCard(room) {
   teardownChatSession();
 
-  if (room.mode === 'room' && room.isHost) {
-    // Хост — перерегистрируемся с тем же room ID
+  // Устанавливаем контекст чата
+  currentChatId = room.chatId;
+  if (room.mode === 'room') {
     roomId = room.roomId || room.chatId;
+  }
+
+  // Сразу показываем чат с историей и заблокированным input
+  showChat();
+  setChatInputEnabled(false);
+  setStatus('ожидание собеседника...');
+  loadChatHistory();
+
+  // Пытаемся подключиться
+  if (room.mode === 'room' && room.isHost) {
     isHost = true;
     dlog('rooms: rejoin как хост ' + roomId);
     if (peer && !peer.destroyed) peer.destroy();
     initPeer(roomId, () => { onOpenAsHost(); });
   } else if (room.mode === 'room') {
-    // Гость — подключаемся к комнате
-    roomId = room.roomId || room.chatId;
     dlog('rooms: rejoin как гость ' + roomId);
     connectToRoom(roomId);
   } else if (room.mode === 'direct' && room.peers && room.peers.length > 0) {
-    // Прямой чат
     dlog('rooms: rejoin direct → ' + room.peers.join(', '));
     for (const peerId of room.peers) {
       connectToPeer(peerId);
@@ -1023,6 +1044,11 @@ function startPeerGrace(peerId, nickname, publicKeyRaw) {
       addSystemMessage(graceKey + ' отключился');
       updateOnlineCount();
       updateLockIcon();
+      // Если никого не осталось — блокируем input
+      if (connections.size === 0 && peerGraceTimers.size === 0) {
+        setChatInputEnabled(false);
+        setStatus('ожидание собеседника...');
+      }
     }
   }, PEER_GRACE_PERIOD);
 }
@@ -1133,6 +1159,7 @@ function handleConnection(conn, graceInfo) {
     }
 
     showChat();
+    setChatInputEnabled(true);
     startPingLoop();
     updateOnlineCount();
     setStatus('подключён — ' + connections.size + ' пир(ов)');
@@ -1286,9 +1313,14 @@ function handleConnection(conn, graceInfo) {
       updateLockIcon();
     }
 
-    setStatus(connections.size > 0
-      ? 'подключён — ' + connections.size + ' пир(ов)'
-      : (peerGraceTimers.size > 0 ? 'переподключение...' : 'все отключились'));
+    if (connections.size > 0) {
+      setStatus('подключён — ' + connections.size + ' пир(ов)');
+    } else if (peerGraceTimers.size > 0) {
+      setStatus('переподключение...');
+    } else {
+      setStatus('ожидание собеседника...');
+      setChatInputEnabled(false);
+    }
 
     if (connections.size === 0 && peerGraceTimers.size === 0) stopPingLoop();
   });
@@ -1580,7 +1612,9 @@ function updateOnlineCount() {
   const connected = connections.size;
   const inGrace = peerGraceTimers.size;
   const total = connected + 1;
-  if (inGrace > 0) {
+  if (connected === 0 && inGrace === 0) {
+    onlineCountEl.textContent = 'оффлайн';
+  } else if (inGrace > 0) {
     onlineCountEl.textContent = total + ' online (+' + inGrace + ' reconnecting)';
   } else {
     onlineCountEl.textContent = total + ' online';

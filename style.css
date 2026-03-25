@@ -790,6 +790,16 @@ button:hover {
   padding: 12px 20px;
 }
 
+#chat-input-row input[type="text"]:disabled,
+#chat-input-row button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.file-label.disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* --- Статус-бар --- */
 #status-bar {
   padding: 6px 16px;
