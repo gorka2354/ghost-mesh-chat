@@ -97,7 +97,7 @@ const CHUNK_SIZE = 16000;
 
 // --- IndexedDB — локальное хранилище сообщений ---
 const DB_NAME = 'ghost-mesh-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let db = null;
 
 function openDB() {
@@ -105,21 +105,95 @@ function openDB() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
       const database = e.target.result;
+      // v1: messages
       if (!database.objectStoreNames.contains('messages')) {
         const store = database.createObjectStore('messages', { keyPath: 'msgId' });
         store.createIndex('chatId', 'chatId', { unique: false });
         store.createIndex('timestamp', 'timestamp', { unique: false });
       }
+      // v2: rooms (список чатов)
+      if (!database.objectStoreNames.contains('rooms')) {
+        database.createObjectStore('rooms', { keyPath: 'chatId' });
+      }
     };
     req.onsuccess = (e) => {
       db = e.target.result;
-      dlog('IndexedDB opened', 'ok');
+      dlog('IndexedDB opened (v' + DB_VERSION + ')', 'ok');
       resolve(db);
     };
     req.onerror = (e) => {
       dlog('IndexedDB error: ' + e.target.error, 'error');
       reject(e.target.error);
     };
+  });
+}
+
+// --- Rooms store: список чатов ---
+
+function saveRoom(chatId, data) {
+  if (!db || !chatId) return;
+  try {
+    const tx = db.transaction('rooms', 'readwrite');
+    const store = tx.objectStore('rooms');
+    const getReq = store.get(chatId);
+    getReq.onsuccess = () => {
+      const existing = getReq.result || {};
+      store.put(Object.assign(existing, data, { chatId: chatId }));
+    };
+  } catch (e) {
+    dlog('saveRoom error: ' + e.message, 'error');
+  }
+}
+
+function updateRoomLastMessage(chatId, text, author) {
+  if (!db || !chatId) return;
+  try {
+    const tx = db.transaction('rooms', 'readwrite');
+    const store = tx.objectStore('rooms');
+    const getReq = store.get(chatId);
+    getReq.onsuccess = () => {
+      const room = getReq.result;
+      if (room) {
+        room.lastMsg = (author ? author + ': ' : '') + (text || '').substring(0, 80);
+        room.lastTs = Date.now();
+        store.put(room);
+      }
+    };
+  } catch (e) {}
+}
+
+function loadAllRooms() {
+  if (!db) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('rooms', 'readonly');
+      const req = tx.objectStore('rooms').getAll();
+      req.onsuccess = () => {
+        const rooms = req.result || [];
+        rooms.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+        resolve(rooms);
+      };
+      req.onerror = () => resolve([]);
+    } catch (e) { resolve([]); }
+  });
+}
+
+function deleteRoom(chatId) {
+  if (!db || !chatId) return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(['rooms', 'messages'], 'readwrite');
+      tx.objectStore('rooms').delete(chatId);
+      // Удаляем сообщения этой комнаты
+      const index = tx.objectStore('messages').index('chatId');
+      const cur = index.openCursor(IDBKeyRange.only(chatId));
+      cur.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) { cursor.delete(); cursor.continue(); }
+      };
+      tx.oncomplete = () => { dlog('deleted room: ' + chatId, 'ok'); resolve(); };
+      tx.onerror = () => resolve();
+    } catch (e) { resolve(); }
   });
 }
 
@@ -389,87 +463,6 @@ function checkInviteLink() {
   return null;
 }
 
-// --- Session persistence (localStorage) ---
-// Два режима: room (комната, 3+) и direct (прямой чат, 1 на 1)
-function saveSession() {
-  try {
-    const data = { mode: null, roomId: null, isHost: false, peers: [] };
-
-    if (roomId) {
-      // Комната
-      data.mode = 'room';
-      data.roomId = roomId;
-      data.isHost = isHost;
-    } else if (connections.size > 0) {
-      // Прямой чат — сохраняем ID собеседников
-      data.mode = 'direct';
-      data.peers = [];
-      for (const [peerId] of connections) {
-        data.peers.push(peerId);
-      }
-    } else {
-      return; // нечего сохранять
-    }
-
-    localStorage.setItem('ghost-session', JSON.stringify(data));
-    dlog('session saved: mode=' + data.mode + (data.roomId ? ' room=' + data.roomId : ' peers=' + data.peers.join(',')));
-  } catch (e) {}
-}
-
-function loadSession() {
-  try {
-    const data = localStorage.getItem('ghost-session');
-    if (!data) return null;
-    return JSON.parse(data);
-  } catch (e) { return null; }
-}
-
-function clearSession() {
-  try { localStorage.removeItem('ghost-session'); } catch (e) {}
-}
-
-function showRejoinOption(session) {
-  const rejoinSection = document.getElementById('rejoin-section');
-  const rejoinRoomId = document.getElementById('rejoin-room-id');
-  const rejoinBtn = document.getElementById('rejoin-btn');
-  if (!rejoinSection || !rejoinBtn) return;
-
-  // Показываем что именно будем rejoin
-  if (session.mode === 'room') {
-    rejoinRoomId.textContent = session.roomId;
-  } else {
-    rejoinRoomId.textContent = session.peers.join(', ');
-  }
-  rejoinSection.classList.remove('hidden');
-
-  rejoinBtn.addEventListener('click', () => {
-    rejoinSection.classList.add('hidden');
-    historyLoaded = false;
-    currentChatId = null;
-
-    if (session.mode === 'room' && session.isHost) {
-      // Хост комнаты — перерегистрируемся с тем же room ID
-      roomId = session.roomId;
-      isHost = true;
-      dlog('rejoin: переподключение как хост ' + roomId);
-      if (peer && !peer.destroyed) peer.destroy();
-      initPeer(roomId, () => { onOpenAsHost(); saveSession(); });
-    } else if (session.mode === 'room') {
-      // Гость комнаты — подключаемся к комнате
-      roomId = session.roomId;
-      dlog('rejoin: подключение к комнате ' + roomId);
-      saveSession();
-      connectToRoom(roomId);
-    } else {
-      // Прямой чат — подключаемся к каждому сохранённому пиру
-      dlog('rejoin: подключение к пирам: ' + session.peers.join(', '));
-      for (const peerId of session.peers) {
-        connectToPeer(peerId);
-      }
-    }
-  });
-}
-
 // --- Переключение на экран чата ---
 let historyLoaded = false;
 
@@ -486,36 +479,167 @@ function showChat() {
 }
 
 // Выход из чата на главный экран (соединения остаются живыми)
+// Пиры, от которых мы сознательно отключились (блокируем реконнект)
+const disconnectedPeers = new Set();
+let disconnectedClearTimer = null;
+
+// Полная очистка текущей сессии чата
+function teardownChatSession() {
+  // Очищаем старый список и собираем текущих пиров
+  disconnectedPeers.clear();
+  if (disconnectedClearTimer) { clearTimeout(disconnectedClearTimer); disconnectedClearTimer = null; }
+
+  const conns = [];
+  for (const [peerId, entry] of connections) {
+    disconnectedPeers.add(peerId);
+    conns.push(entry);
+  }
+
+  // Очищаем Map и таймеры ДО закрытия соединений
+  // (close-обработчики PeerJS могут быть синхронными)
+  connections.clear();
+  stopPingLoop();
+
+  for (const [, info] of peerGraceTimers) {
+    if (info.timer) clearTimeout(info.timer);
+  }
+  peerGraceTimers.clear();
+
+  for (const [, timer] of typingTimers) {
+    clearTimeout(timer);
+  }
+  typingTimers.clear();
+  typingIndicator.classList.add('hidden');
+
+  // Теперь закрываем соединения (close-обработчики увидят пустой Map)
+  for (const entry of conns) {
+    try { entry.conn.close(); } catch (e) {}
+  }
+
+  // Сбрасываем состояние
+  roomId = null;
+  isHost = false;
+  currentChatId = null;
+  historyLoaded = false;
+
+  // Очищаем UI сообщений
+  messagesEl.innerHTML = '';
+  updateOnlineCount();
+  updateLockIcon();
+
+  // Автоочистка disconnectedPeers через 15 сек
+  disconnectedClearTimer = setTimeout(() => {
+    disconnectedPeers.clear();
+    disconnectedClearTimer = null;
+  }, 15000);
+
+  dlog('teardownChatSession: сессия очищена, blocked peers: ' + [...disconnectedPeers].join(', '));
+}
+
 function leaveChat() {
+  teardownChatSession();
+  // Уничтожаем peer и переинициализируем с никнеймом
+  // (чтобы peer ID не остался roomId хоста)
+  if (peer && !peer.destroyed) peer.destroy();
+  initPeer(myNickname);
+
   chatScreen.classList.add('hidden');
   roomScreen.classList.add('hidden');
   connectScreen.classList.remove('hidden');
   window.history.replaceState(null, '', window.location.pathname);
   setStatus('online — главный экран');
-  dlog('leaveChat: вернулись на главный экран (соединения активны: ' + connections.size + ')');
-  showActiveChatButton();
+  dlog('leaveChat: вернулись на главный экран');
+  renderRoomsList();
 }
 
-// Показать кнопку возврата в активный чат
-function showActiveChatButton() {
-  const section = document.getElementById('active-chat-section');
-  const nameEl = document.getElementById('active-chat-name');
-  if (!section) return;
+// --- Список чатов (мои чаты) ---
+async function renderRoomsList() {
+  const section = document.getElementById('rooms-section');
+  const list = document.getElementById('rooms-list');
+  if (!section || !list) return;
 
-  if (connections.size > 0 || peerGraceTimers.size > 0) {
-    const label = roomId ? '# ' + roomId : 'direct';
-    nameEl.textContent = label;
-    section.classList.remove('hidden');
-  } else {
+  const rooms = await loadAllRooms();
+  if (rooms.length === 0) {
     section.classList.add('hidden');
+    return;
+  }
+
+  list.innerHTML = '';
+  section.classList.remove('hidden');
+
+  for (const room of rooms) {
+    const card = document.createElement('div');
+    card.className = 'room-card';
+
+    const info = document.createElement('div');
+    info.className = 'room-card-info';
+
+    const name = document.createElement('div');
+    name.className = 'room-card-name';
+    name.textContent = room.name || room.chatId;
+
+    const last = document.createElement('div');
+    last.className = 'room-card-last';
+    last.textContent = room.lastMsg || 'нет сообщений';
+
+    info.appendChild(name);
+    info.appendChild(last);
+
+    const time = document.createElement('div');
+    time.className = 'room-card-time';
+    time.textContent = room.lastTs ? formatRoomTime(room.lastTs) : '';
+
+    const del = document.createElement('button');
+    del.className = 'room-card-delete';
+    del.textContent = '×';
+    del.title = 'удалить чат';
+    del.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await deleteRoom(room.chatId);
+      renderRoomsList();
+    });
+
+    card.appendChild(info);
+    card.appendChild(time);
+    card.appendChild(del);
+
+    card.addEventListener('click', () => rejoinFromRoomCard(room));
+    list.appendChild(card);
   }
 }
 
-// Вернуться в активный чат
-function returnToChat() {
-  const section = document.getElementById('active-chat-section');
-  if (section) section.classList.add('hidden');
-  showChat();
+function formatRoomTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  if (now - d < 86400000 && d.getDate() === now.getDate()) {
+    return d.toTimeString().substring(0, 5);
+  }
+  if (now - d < 172800000) return 'вчера';
+  return d.getDate() + '.' + (d.getMonth() + 1).toString().padStart(2, '0');
+}
+
+function rejoinFromRoomCard(room) {
+  teardownChatSession();
+
+  if (room.mode === 'room' && room.isHost) {
+    // Хост — перерегистрируемся с тем же room ID
+    roomId = room.roomId || room.chatId;
+    isHost = true;
+    dlog('rooms: rejoin как хост ' + roomId);
+    if (peer && !peer.destroyed) peer.destroy();
+    initPeer(roomId, () => { onOpenAsHost(); });
+  } else if (room.mode === 'room') {
+    // Гость — подключаемся к комнате
+    roomId = room.roomId || room.chatId;
+    dlog('rooms: rejoin как гость ' + roomId);
+    connectToRoom(roomId);
+  } else if (room.mode === 'direct' && room.peers && room.peers.length > 0) {
+    // Прямой чат
+    dlog('rooms: rejoin direct → ' + room.peers.join(', '));
+    for (const peerId of room.peers) {
+      connectToPeer(peerId);
+    }
+  }
 }
 
 // Загрузка истории — вызывается после hello, когда chatId стабилен
@@ -779,12 +903,15 @@ function onOpenAsHost() {
 }
 
 function createRoom() {
+  teardownChatSession();
   roomId = generateRoomId();
   isHost = true;
-  historyLoaded = false;
-  currentChatId = null;
-  peer.destroy();
-  initPeer(roomId, () => { onOpenAsHost(); updateChatId(); saveSession(); });
+  if (peer && !peer.destroyed) peer.destroy();
+  initPeer(roomId, () => {
+    onOpenAsHost();
+    updateChatId();
+    saveRoom(roomId, { name: '# ' + roomId, mode: 'room', isHost: true, roomId: roomId, lastTs: Date.now(), peers: [] });
+  });
 }
 
 function connectToPeer(remotePeerId) {
@@ -959,12 +1086,34 @@ function checkAllConnections() {
 
 // --- Обработка соединения ---
 function handleConnection(conn, graceInfo) {
+  const ownerPeer = peer; // Запоминаем текущий экземпляр peer
+
   conn.on('open', () => {
+    // Игнорируем events от старого уничтоженного peer
+    if (peer !== ownerPeer) {
+      dlog('stale conn.open from old peer, ignoring');
+      try { conn.close(); } catch (e) {}
+      return;
+    }
+
+    // Отклоняем реконнект от пиров, которых мы сознательно отключили
+    if (disconnectedPeers.has(conn.peer)) {
+      dlog('rejecting reconnect from disconnected peer: ' + conn.peer);
+      try { conn.close(); } catch (e) {}
+      return;
+    }
+
     // Проверяем — это реконнект после грейса?
     const wasInGrace = peerGraceTimers.has(conn.peer);
     if (wasInGrace) {
       cancelPeerGrace(conn.peer);
       dlog('peer reconnected: ' + conn.peer + ' (из грейса)', 'ok');
+    }
+
+    // Если уже есть соединения в direct-чате и это новый пир — переключаемся
+    if (!wasInGrace && connections.size > 0 && !(isHost && roomId)) {
+      dlog('new peer in direct chat: teardown old session, switching');
+      teardownChatSession();
     }
 
     connections.set(conn.peer, { conn: conn, nickname: (graceInfo && graceInfo.nickname) || null, sharedKey: null, publicKeyRaw: (graceInfo && graceInfo.publicKeyRaw) || null });
@@ -986,11 +1135,12 @@ function handleConnection(conn, graceInfo) {
     showChat();
     startPingLoop();
     updateOnlineCount();
-    saveSession();
     setStatus('подключён — ' + connections.size + ' пир(ов)');
   });
 
   conn.on('data', async (raw) => {
+    // Игнорируем данные от соединений, не принадлежащих текущей сессии
+    if (!connections.has(conn.peer)) return;
     let parsed = null;
     if (typeof raw === 'string') {
       try { parsed = JSON.parse(raw); } catch (e) { /* обычный текст */ }
@@ -1061,8 +1211,22 @@ function handleConnection(conn, graceInfo) {
       }
       updateChatId();
       loadChatHistory();
-      saveSession();
       updateOnlineCount();
+
+      // Сохраняем чат в список
+      const cid = getChatId();
+      if (cid) {
+        const peersList = [];
+        for (const [pid] of connections) peersList.push(pid);
+        saveRoom(cid, {
+          name: roomId ? '# ' + roomId : '@ ' + parsed.nickname,
+          mode: roomId ? 'room' : 'direct',
+          isHost: isHost,
+          roomId: roomId || null,
+          peers: peersList,
+          lastTs: Date.now()
+        });
+      }
       return;
     }
 
@@ -1091,8 +1255,10 @@ function handleConnection(conn, graceInfo) {
 
   conn.on('close', () => {
     const entry = connections.get(conn.peer);
-    const name = (entry && entry.nickname) || conn.peer;
-    const pubKey = entry ? entry.publicKeyRaw : null;
+    // Если соединения нет в Map — закрыто через teardownChatSession, игнорируем
+    if (!entry) return;
+    const name = entry.nickname || conn.peer;
+    const pubKey = entry.publicKeyRaw;
     connections.delete(conn.peer);
     clearTypingTimer(conn.peer);
 
@@ -1469,15 +1635,17 @@ function addMessage(author, text, isMe = false) {
   }
 
   // Сохраняем в IndexedDB
+  const chatId = getChatId();
   saveMessageToDB({
     msgId: generateMsgId(),
-    chatId: getChatId(),
+    chatId: chatId,
     type: 'msg',
     author: author,
     text: text,
     timeStr: timeStr,
     timestamp: Date.now()
   });
+  updateRoomLastMessage(chatId, text, author);
 }
 
 function addSystemMessage(text, saveToDB = true) {
@@ -1695,16 +1863,19 @@ function copyToClipboard(text, feedbackEl) {
 // --- Обработчики событий ---
 
 document.getElementById('back-btn').addEventListener('click', leaveChat);
-document.getElementById('return-chat-btn').addEventListener('click', returnToChat);
 
 createRoomBtn.addEventListener('click', createRoom);
 
 connectBtn.addEventListener('click', () => {
+  if (connections.size > 0) teardownChatSession();
   connectToPeer(peerIdInput.value);
 });
 
 peerIdInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') connectToPeer(peerIdInput.value);
+  if (e.key === 'Enter') {
+    if (connections.size > 0) teardownChatSession();
+    connectToPeer(peerIdInput.value);
+  }
 });
 
 sendBtn.addEventListener('click', sendMessage);
@@ -1732,7 +1903,6 @@ document.getElementById('new-id-btn').addEventListener('click', () => {
   myNickname = resetNickname();
   myIdEl.textContent = myNickname;
   myIdCopyEl.textContent = myNickname;
-  clearSession();
   dlog('new identity: ' + myNickname, 'ok');
   // Переинициализируем peer с новым ID
   if (peer && !peer.destroyed) peer.destroy();
@@ -1893,50 +2063,23 @@ debugToggle.addEventListener('click', () => {
     myPublicKeyJwk = null;
   }
 
+  // Показываем список сохранённых чатов
+  await renderRoomsList();
+
   const inviteHash = checkInviteLink();
-  const savedSession = loadSession();
 
-  // Определяем режим старта
-  if (inviteHash && savedSession && savedSession.roomId === inviteHash && savedSession.isHost) {
-    // Хост перезагрузил страницу — перерегистрируемся с тем же room ID
-    roomId = inviteHash;
-    isHost = true;
-    dlog('restart as host: ' + roomId);
-    updateChatId();
-    initPeer(roomId, () => { onOpenAsHost(); loadChatHistory(); saveSession(); });
-
-  } else if (inviteHash && savedSession && savedSession.roomId === inviteHash) {
-    // Гость перезагрузил страницу — авто-подключение к комнате
-    roomId = inviteHash;
-    dlog('restart as guest: ' + roomId);
-    initPeer(myNickname, () => {
-      saveSession();
-      connectToRoom(inviteHash);
-    });
-
-  } else if (inviteHash) {
-    // Новое приглашение по ссылке (первый вход)
+  // Два сценария:
+  // 1) Invite-ссылка #room-XXXX → подключаемся к комнате
+  // 2) Нет → главный экран + список чатов
+  if (inviteHash) {
     roomId = inviteHash;
     dlog('invite link: ' + inviteHash);
     initPeer(myNickname, () => {
-      saveSession();
       connectToRoom(inviteHash);
+      // Очищаем хеш — ссылка одноразовая
+      window.history.replaceState(null, '', window.location.pathname);
     });
-
-  } else if (savedSession && savedSession.mode === 'room' && savedSession.roomId) {
-    // Сохранённая сессия комнаты (без хеша в URL) — кнопка rejoin
-    dlog('saved session: room=' + savedSession.roomId + ' host=' + savedSession.isHost);
-    showRejoinOption(savedSession);
-    initPeer(myNickname);
-
-  } else if (savedSession && savedSession.mode === 'direct' && savedSession.peers && savedSession.peers.length > 0) {
-    // Сохранённая сессия прямого чата — кнопка rejoin
-    dlog('saved session: direct peers=' + savedSession.peers.join(','));
-    showRejoinOption(savedSession);
-    initPeer(myNickname);
-
   } else {
-    // Чистый старт
     initPeer(myNickname);
   }
 })();
@@ -1985,7 +2128,6 @@ function retryRoomConnect(roomPeerId) {
   } else {
     dlog('room connect failed after ' + MAX_ROOM_RETRIES + ' attempts', 'error');
     setStatus('комната не найдена');
-    clearSession();
     // Возвращаем на главный экран
     chatScreen.classList.add('hidden');
     roomScreen.classList.add('hidden');
