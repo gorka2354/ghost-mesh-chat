@@ -87,6 +87,7 @@ let peer = null;
 let isHost = false;
 let roomId = null;
 let myNickname = loadOrCreateNickname();
+let myAvatarData = null; // массив 64 hex-цветов (8x8) или null (авто-генерация)
 // peerId -> { conn, nickname, sharedKey (CryptoKey), publicKeyRaw, chatId, silent, fromGrace }
 const connections = new Map();
 
@@ -113,12 +114,23 @@ const CHUNK_SIZE = 16000;
 
 // --- IndexedDB — локальное хранилище сообщений ---
 const DB_NAME = 'ghost-mesh-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let db = null;
 
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+
+    // Таймаут — если DB заблокирована, не висим вечно
+    const timeout = setTimeout(() => {
+      dlog('IndexedDB timeout (blocked?), продолжаем без DB', 'warn');
+      resolve(null);
+    }, 3000);
+
+    req.onblocked = () => {
+      dlog('IndexedDB blocked — закрой другие вкладки', 'warn');
+    };
+
     req.onupgradeneeded = (e) => {
       const database = e.target.result;
       // v1: messages
@@ -131,16 +143,54 @@ function openDB() {
       if (!database.objectStoreNames.contains('rooms')) {
         database.createObjectStore('rooms', { keyPath: 'chatId' });
       }
+      // v3: profile (профиль пользователя)
+      if (!database.objectStoreNames.contains('profile')) {
+        database.createObjectStore('profile', { keyPath: 'id' });
+      }
     };
     req.onsuccess = (e) => {
+      clearTimeout(timeout);
       db = e.target.result;
+      // Закрываем DB при запросе upgrade из другой вкладки
+      db.onversionchange = () => {
+        db.close();
+        db = null;
+        dlog('IndexedDB: другая вкладка обновляет схему, DB закрыта', 'warn');
+      };
       dlog('IndexedDB opened (v' + DB_VERSION + ')', 'ok');
       resolve(db);
     };
     req.onerror = (e) => {
+      clearTimeout(timeout);
       dlog('IndexedDB error: ' + e.target.error, 'error');
       reject(e.target.error);
     };
+  });
+}
+
+// --- Profile store: профиль пользователя ---
+
+function saveProfile(data) {
+  if (!db) return;
+  try {
+    const tx = db.transaction('profile', 'readwrite');
+    tx.objectStore('profile').put(Object.assign({ id: 'main' }, data));
+  } catch (e) {
+    dlog('saveProfile error: ' + e.message, 'error');
+  }
+}
+
+function loadProfileFromDB() {
+  if (!db) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('profile', 'readonly');
+      const req = tx.objectStore('profile').get('main');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
   });
 }
 
@@ -329,14 +379,42 @@ const incomingFiles = new Map();
 let myKeyPair = null;   // { publicKey, privateKey }
 let myPublicKeyJwk = null; // экспортированный публичный ключ
 
-// Генерация пары ключей ECDH
+// Генерация пары ключей ECDH (extractable для сохранения в профиль)
 async function generateKeyPair() {
   myKeyPair = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
-    false,
+    true,
     ['deriveKey']
   );
   myPublicKeyJwk = await crypto.subtle.exportKey('jwk', myKeyPair.publicKey);
+}
+
+// Загрузка ключей из профиля или генерация новых
+async function loadOrCreateKeys() {
+  const profile = await loadProfileFromDB();
+  if (profile && profile.publicKey && profile.privateKey) {
+    try {
+      const pubKey = await crypto.subtle.importKey(
+        'jwk', profile.publicKey,
+        { name: 'ECDH', namedCurve: 'P-256' }, true, []
+      );
+      const privKey = await crypto.subtle.importKey(
+        'jwk', profile.privateKey,
+        { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']
+      );
+      myKeyPair = { publicKey: pubKey, privateKey: privKey };
+      myPublicKeyJwk = profile.publicKey;
+      dlog('keys loaded from profile', 'ok');
+      return;
+    } catch (e) {
+      dlog('failed to load keys, regenerating: ' + e.message, 'warn');
+    }
+  }
+  await generateKeyPair();
+  // Сохраняем ключи в профиль
+  const privJwk = await crypto.subtle.exportKey('jwk', myKeyPair.privateKey);
+  saveProfile({ publicKey: myPublicKeyJwk, privateKey: privJwk });
+  dlog('keys generated and saved', 'ok');
 }
 
 // Получение shared AES-GCM ключа из публичного ключа пира
@@ -392,8 +470,25 @@ function getFingerprint(jwk) {
   return Math.abs(hash).toString(16).toUpperCase().padStart(8, '0');
 }
 
-// --- Пиксельная аватарка 4x4 из хэша никнейма ---
-function generateAvatar(nickname) {
+// Кэш аватаров пиров (nickname → avatarData)
+const peerAvatars = new Map();
+
+// --- Пиксельная аватарка из данных или хэша никнейма ---
+function generateAvatar(nickname, avatarData) {
+  // Кастомный аватар (свой или полученный от пира)
+  const data = avatarData || (nickname === myNickname ? myAvatarData : null) || peerAvatars.get(nickname);
+  if (data && data.length === 64) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 8;
+    canvas.height = 8;
+    const ctx = canvas.getContext('2d');
+    for (let i = 0; i < 64; i++) {
+      ctx.fillStyle = data[i];
+      ctx.fillRect(i % 8, Math.floor(i / 8), 1, 1);
+    }
+    return canvas.toDataURL();
+  }
+  // Фоллбэк: генерация из хэша ника (4x4 зеркальный)
   let hash = 0;
   for (let i = 0; i < nickname.length; i++) {
     hash = ((hash << 5) - hash + nickname.charCodeAt(i)) | 0;
@@ -1228,7 +1323,7 @@ function handleConnection(conn, graceInfo, isIncoming) {
     });
 
     // Отправляем hello с публичным ключом + active: собеседник в этом чате?
-    sendToRaw(conn, { type: 'hello', nickname: myNickname, publicKey: myPublicKeyJwk, active: !isSilent });
+    sendToRaw(conn, { type: 'hello', nickname: myNickname, publicKey: myPublicKeyJwk, active: !isSilent, avatar: myAvatarData });
 
     // Хост отправляет список пиров (только из этой комнаты)
     if (isHost) {
@@ -1297,6 +1392,8 @@ function handleConnection(conn, graceInfo, isIncoming) {
       if (entry) {
         entry.nickname = parsed.nickname;
         entry.publicKeyRaw = parsed.publicKey;
+        // Сохраняем аватар пира
+        if (parsed.avatar) peerAvatars.set(parsed.nickname, parsed.avatar);
 
         // Проверяем — этот никнейм был в грейсе? (реконнект с новым peer ID)
         const wasInGrace = peerGraceTimers.has(parsed.nickname);
@@ -2248,6 +2345,172 @@ debugToggle.addEventListener('click', () => {
   debugToggle.textContent = debugPanel.classList.contains('hidden') ? '▸ log' : '▾ log';
 });
 
+// === Профиль пользователя ===
+const AVATAR_SIZE = 8;
+const AVATAR_PALETTE = [
+  '#1a1b26', '#3b4261', '#565f89', '#787c99',
+  '#9ece6a', '#7aa2f7', '#bb9af7', '#f7768e',
+  '#ff9e64', '#e0af68', '#d4a574', '#e8d4b8',
+  '#2ac3de', '#73daca', '#ffffff'
+];
+
+const profileModal = document.getElementById('profile-modal');
+const profileBtn = document.getElementById('profile-btn');
+const profileClose = document.getElementById('profile-close');
+const profileSave = document.getElementById('profile-save');
+const profileNickname = document.getElementById('profile-nickname');
+const profileFingerprint = document.getElementById('profile-fingerprint');
+const avatarPreview = document.getElementById('avatar-preview');
+const avatarCanvas = document.getElementById('avatar-canvas');
+const avatarPalette = document.getElementById('avatar-palette');
+const avatarMirror = document.getElementById('avatar-mirror');
+const avatarRandomize = document.getElementById('avatar-randomize');
+const avatarClear = document.getElementById('avatar-clear');
+
+let editorPixels = new Array(AVATAR_SIZE * AVATAR_SIZE).fill(AVATAR_PALETTE[0]);
+let selectedColor = AVATAR_PALETTE[7];
+let isDrawing = false;
+
+// Инициализация палитры
+AVATAR_PALETTE.forEach(color => {
+  const el = document.createElement('div');
+  el.className = 'palette-color' + (color === selectedColor ? ' active' : '');
+  el.style.background = color;
+  el.addEventListener('click', () => {
+    avatarPalette.querySelector('.active')?.classList.remove('active');
+    el.classList.add('active');
+    selectedColor = color;
+  });
+  avatarPalette.appendChild(el);
+});
+
+// Рендер пикселей на canvas
+function renderEditor() {
+  const ctx = avatarCanvas.getContext('2d');
+  for (let i = 0; i < editorPixels.length; i++) {
+    const x = i % AVATAR_SIZE;
+    const y = Math.floor(i / AVATAR_SIZE);
+    ctx.fillStyle = editorPixels[i];
+    ctx.fillRect(x, y, 1, 1);
+  }
+  // Превью
+  const pCtx = avatarPreview.getContext('2d');
+  pCtx.drawImage(avatarCanvas, 0, 0);
+}
+
+// Рисование на canvas
+function paintPixel(e) {
+  const rect = avatarCanvas.getBoundingClientRect();
+  const scaleX = AVATAR_SIZE / rect.width;
+  const scaleY = AVATAR_SIZE / rect.height;
+  const x = Math.floor((e.clientX - rect.left) * scaleX);
+  const y = Math.floor((e.clientY - rect.top) * scaleY);
+  if (x < 0 || x >= AVATAR_SIZE || y < 0 || y >= AVATAR_SIZE) return;
+  editorPixels[y * AVATAR_SIZE + x] = selectedColor;
+  if (avatarMirror.checked) {
+    const mx = AVATAR_SIZE - 1 - x;
+    editorPixels[y * AVATAR_SIZE + mx] = selectedColor;
+  }
+  renderEditor();
+}
+
+avatarCanvas.addEventListener('mousedown', (e) => { isDrawing = true; paintPixel(e); });
+avatarCanvas.addEventListener('mousemove', (e) => { if (isDrawing) paintPixel(e); });
+window.addEventListener('mouseup', () => { isDrawing = false; });
+
+// Touch support
+avatarCanvas.addEventListener('touchstart', (e) => {
+  e.preventDefault(); isDrawing = true;
+  paintPixel(e.touches[0]);
+});
+avatarCanvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (isDrawing) paintPixel(e.touches[0]);
+});
+avatarCanvas.addEventListener('touchend', () => { isDrawing = false; });
+
+// Рандомизация аватара (зеркальный паттерн)
+function randomizeAvatar() {
+  const bg = AVATAR_PALETTE[Math.floor(Math.random() * 4)];
+  const fg = AVATAR_PALETTE[4 + Math.floor(Math.random() * (AVATAR_PALETTE.length - 4))];
+  editorPixels.fill(bg);
+  for (let y = 0; y < AVATAR_SIZE; y++) {
+    for (let x = 0; x < Math.ceil(AVATAR_SIZE / 2); x++) {
+      if (Math.random() > 0.5) {
+        editorPixels[y * AVATAR_SIZE + x] = fg;
+        editorPixels[y * AVATAR_SIZE + (AVATAR_SIZE - 1 - x)] = fg;
+      }
+    }
+  }
+  renderEditor();
+}
+
+avatarRandomize.addEventListener('click', randomizeAvatar);
+avatarClear.addEventListener('click', () => {
+  editorPixels.fill(AVATAR_PALETTE[0]);
+  renderEditor();
+});
+
+// Открытие модалки
+function openProfileModal() {
+  profileNickname.value = myNickname;
+  if (myPublicKeyJwk) {
+    profileFingerprint.textContent = getFingerprint(myPublicKeyJwk);
+  }
+  if (myAvatarData) {
+    editorPixels = [...myAvatarData];
+  } else {
+    randomizeAvatar();
+  }
+  renderEditor();
+  profileModal.classList.remove('hidden');
+}
+
+function closeProfileModal() {
+  profileModal.classList.add('hidden');
+}
+
+profileBtn.addEventListener('click', openProfileModal);
+profileClose.addEventListener('click', closeProfileModal);
+profileModal.querySelector('.modal-backdrop').addEventListener('click', closeProfileModal);
+
+profileFingerprint.addEventListener('click', () => {
+  copyToClipboard(profileFingerprint.textContent, profileFingerprint);
+});
+
+// Сохранение профиля
+profileSave.addEventListener('click', async () => {
+  const newNick = profileNickname.value.trim();
+  if (!newNick) return;
+
+  const nickChanged = newNick !== myNickname;
+  myNickname = newNick;
+  myAvatarData = [...editorPixels];
+  try { localStorage.setItem('ghost-nickname', myNickname); } catch (e) {}
+
+  // Сохраняем в IndexedDB
+  const profileData = { nickname: myNickname, avatarData: myAvatarData };
+  if (myKeyPair) {
+    profileData.publicKey = myPublicKeyJwk;
+    profileData.privateKey = await crypto.subtle.exportKey('jwk', myKeyPair.privateKey);
+  }
+  saveProfile(profileData);
+
+  // Обновляем UI
+  myIdEl.textContent = myNickname;
+  myIdCopyEl.textContent = myNickname;
+
+  // Если ник изменился — переинициализируем peer (новый ID на signaling)
+  if (nickChanged) {
+    if (peer && !peer.destroyed) peer.destroy();
+    initPeer(myNickname);
+    dlog('peer reinit with new nickname: ' + myNickname, 'ok');
+  }
+
+  closeProfileModal();
+  dlog('profile saved: ' + myNickname, 'ok');
+});
+
 (async function start() {
   dlog('start: userAgent=' + navigator.userAgent);
   dlog('start: url=' + location.href);
@@ -2259,11 +2522,23 @@ debugToggle.addEventListener('click', () => {
     dlog('IndexedDB unavailable, history disabled', 'warn');
   }
 
+  // Загружаем профиль (ник, аватар)
+  const savedProfile = await loadProfileFromDB();
+  if (savedProfile) {
+    if (savedProfile.nickname) {
+      myNickname = savedProfile.nickname;
+      try { localStorage.setItem('ghost-nickname', myNickname); } catch (e) {}
+    }
+    if (savedProfile.avatarData) {
+      myAvatarData = savedProfile.avatarData;
+    }
+    dlog('profile loaded: ' + myNickname, 'ok');
+  }
+
   try {
-    setStatus('генерация ключей...');
-    dlog('generating ECDH keys...');
-    await generateKeyPair();
-    dlog('keys generated OK', 'ok');
+    setStatus('загрузка ключей...');
+    dlog('loading/generating ECDH keys...');
+    await loadOrCreateKeys();
     setStatus('ключи готовы, подключение...');
   } catch (e) {
     dlog('crypto error: ' + e.message, 'error');

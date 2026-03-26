@@ -34,6 +34,7 @@
       <div class="header-right">
         <button id="typewriter-toggle" class="icon-btn" title="анимация текста">▸ anim</button>
         <button id="debug-toggle" class="icon-btn" title="debug лог">▸ log</button>
+        <button id="profile-btn" class="icon-btn" title="профиль">&#x1F464;</button>
         <span id="signal-status" class="signal-dot" title="signaling server"></span>
         <span id="my-id" class="my-id">connecting...</span>
       </div>
@@ -102,6 +103,42 @@
         <button id="debug-clear" class="icon-btn">clear</button>
       </div>
       <div id="debug-log"></div>
+    </div>
+
+    <!-- Модалка профиля -->
+    <div id="profile-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <span class="modal-title">&gt; profile</span>
+          <button id="profile-close" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="profile-avatar-section">
+            <canvas id="avatar-preview" width="8" height="8"></canvas>
+            <div class="profile-avatar-actions">
+              <button id="avatar-randomize" class="btn-mini">random</button>
+              <button id="avatar-clear" class="btn-mini">clear</button>
+            </div>
+          </div>
+          <div id="avatar-editor">
+            <canvas id="avatar-canvas" width="8" height="8"></canvas>
+            <div id="avatar-palette"></div>
+            <label class="mirror-toggle">
+              <input type="checkbox" id="avatar-mirror" checked> mirror
+            </label>
+          </div>
+          <div class="profile-fields">
+            <label class="field-label">&gt; nickname</label>
+            <input type="text" id="profile-nickname" spellcheck="false" autocomplete="off" maxlength="20">
+            <label class="field-label">&gt; fingerprint</label>
+            <span id="profile-fingerprint" class="copyable mono">...</span>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="profile-save" class="btn-primary">save</button>
+        </div>
+      </div>
     </div>
 
     <!-- Статус-бар -->
