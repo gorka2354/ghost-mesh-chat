@@ -63,18 +63,6 @@
       <p class="hint">твой ID: <span id="my-id-copy" class="copyable">...</span> <button id="new-id-btn" class="btn-mini" title="сменить ID">↻</button></p>
     </div>
 
-    <!-- Экран комнаты (ожидание) -->
-    <div id="room-screen" class="hidden">
-      <div class="room-info">
-        <p class="prompt">&gt; комната создана. отправь ссылку собеседнику:</p>
-        <div class="invite-link-row">
-          <span id="invite-link" class="copyable">...</span>
-          <button id="copy-link-btn">copy</button>
-        </div>
-        <p class="hint waiting-dots">ожидание подключения</p>
-      </div>
-    </div>
-
     <!-- Экран чата -->
     <div id="chat-screen" class="hidden">
       <div id="chat-header">
@@ -84,6 +72,10 @@
           <span id="lock-icon" title="статус шифрования"></span>
           <span id="online-count">0 online</span>
         </div>
+      </div>
+      <div id="invite-bar" class="hidden">
+        <span id="invite-link" class="copyable">...</span>
+        <button id="copy-link-btn">copy</button>
       </div>
       <div id="messages"></div>
       <div id="typing-indicator" class="hidden">

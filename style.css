@@ -337,36 +337,6 @@ button:hover {
   color: var(--bg);
 }
 
-/* --- Экран комнаты (ожидание) --- */
-#room-screen {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding: 20px;
-}
-
-.room-info {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 14px;
-}
-
-.invite-link-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.invite-link-row .copyable {
-  font-size: 12px;
-  word-break: break-all;
-  max-width: 400px;
-  text-align: center;
-}
-
 /* --- Заголовок чата --- */
 #chat-header {
   display: flex;
@@ -376,6 +346,28 @@ button:hover {
   border-bottom: 1px solid var(--border);
   background: var(--bg-card);
   font-size: 11px;
+}
+
+#invite-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 5px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+#invite-bar .copyable {
+  font-size: 11px;
+  word-break: break-all;
+  opacity: 0.7;
+}
+
+#invite-bar button {
+  font-size: 10px;
+  padding: 2px 8px;
 }
 
 .back-btn {
@@ -394,6 +386,7 @@ button:hover {
   color: var(--accent);
   background: transparent;
 }
+
 
 #room-id-display {
   color: var(--accent);

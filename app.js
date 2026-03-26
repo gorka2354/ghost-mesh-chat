@@ -7,8 +7,8 @@ const peerIdInput = document.getElementById('peer-id-input');
 const connectBtn = document.getElementById('connect-btn');
 const createRoomBtn = document.getElementById('create-room-btn');
 const connectScreen = document.getElementById('connect-screen');
-const roomScreen = document.getElementById('room-screen');
 const inviteLinkEl = document.getElementById('invite-link');
+const inviteBar = document.getElementById('invite-bar');
 const copyLinkBtn = document.getElementById('copy-link-btn');
 const chatScreen = document.getElementById('chat-screen');
 const roomIdDisplay = document.getElementById('room-id-display');
@@ -481,8 +481,9 @@ let historyLoaded = false;
 
 function showChat() {
   connectScreen.classList.add('hidden');
-  roomScreen.classList.add('hidden');
   chatScreen.classList.remove('hidden');
+  // Invite-bar только для комнат где мы хост
+  if (!(isHost && roomId)) hideInviteBar();
   if (roomId) {
     roomIdDisplay.textContent = '# ' + roomId;
   } else if (currentChatId && currentChatId.startsWith('dm:')) {
@@ -574,7 +575,7 @@ function leaveChat() {
   initPeer(myNickname);
 
   chatScreen.classList.add('hidden');
-  roomScreen.classList.add('hidden');
+  hideInviteBar();
   connectScreen.classList.remove('hidden');
   window.history.replaceState(null, '', window.location.pathname);
   setStatus('online — главный экран');
@@ -935,7 +936,7 @@ function initPeer(peerId, onOpen) {
         roomId = generateRoomId();
         initPeer(roomId, onOpenAsHost);
       } else {
-        initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4));
+        initPeer(myNickname + '-' + Math.random().toString(16).substring(2, 4), onOpen);
       }
       return;
     }
@@ -961,11 +962,20 @@ function initPeer(peerId, onOpen) {
   });
 }
 
-function onOpenAsHost() {
+function showInviteBar() {
   const link = window.location.origin + window.location.pathname + '#' + roomId;
   inviteLinkEl.textContent = link;
-  connectScreen.classList.add('hidden');
-  roomScreen.classList.remove('hidden');
+  inviteBar.classList.remove('hidden');
+}
+
+function hideInviteBar() {
+  inviteBar.classList.add('hidden');
+}
+
+function onOpenAsHost() {
+  showInviteBar();
+  showChat();
+  setChatInputEnabled(false);
   setStatus('комната ' + roomId + ' — ожидание');
   window.history.replaceState(null, '', '#' + roomId);
 }
@@ -974,10 +984,10 @@ function createRoom() {
   teardownChatSession();
   roomId = generateRoomId();
   isHost = true;
+  currentChatId = roomId;
   if (peer && !peer.destroyed) peer.destroy();
   initPeer(roomId, () => {
     onOpenAsHost();
-    updateChatId();
     saveRoom(roomId, { name: '# ' + roomId, mode: 'room', isHost: true, roomId: roomId, lastTs: Date.now(), peers: [] });
   });
 }
@@ -1187,7 +1197,7 @@ function handleConnection(conn, graceInfo, isIncoming) {
 
     // Если в direct-чате и это новый входящий пир (не grace, не комната) —
     // принимаем молча (чат появится в списке после hello), но не переключаем экран
-    const busyInChat = inChat && !wasInGrace && isIncoming && chatConnectionsCount() > 0 && !(isHost && roomId);
+    const busyInChat = inChat && !wasInGrace && isIncoming && chatConnectionsCount() > 0 && !roomId;
     if (busyInChat) {
       dlog('incoming while in chat: accepting silently (will appear in rooms list)');
     }
@@ -2328,7 +2338,7 @@ function retryRoomConnect(roomPeerId) {
     setStatus('комната не найдена');
     // Возвращаем на главный экран
     chatScreen.classList.add('hidden');
-    roomScreen.classList.add('hidden');
+    hideInviteBar();
     connectScreen.classList.remove('hidden');
     window.history.replaceState(null, '', window.location.pathname);
   }
