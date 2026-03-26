@@ -842,7 +842,16 @@ function rejoinFromRoomCard(room) {
     isHost = true;
     dlog('rooms: rejoin как хост ' + roomId);
     if (peer && !peer.destroyed) peer.destroy();
-    initPeer(roomId, () => { onOpenAsHost(); });
+    initPeer(roomId, () => {
+      onOpenAsHost();
+      // Активно подключаемся к известным пирам (они не знают что хост вернулся)
+      if (room.peers && room.peers.length > 0) {
+        dlog('rooms: хост подключается к пирам: ' + room.peers.join(', '));
+        for (const peerId of room.peers) {
+          connectToPeer(peerId);
+        }
+      }
+    });
   } else if (room.mode === 'room') {
     dlog('rooms: rejoin как гость ' + roomId);
     connectToRoom(roomId);
