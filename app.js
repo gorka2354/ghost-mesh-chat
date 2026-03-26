@@ -87,8 +87,24 @@ let peer = null;
 let isHost = false;
 let roomId = null;
 let myNickname = loadOrCreateNickname();
-// peerId -> { conn, nickname, sharedKey (CryptoKey), publicKeyRaw }
+// peerId -> { conn, nickname, sharedKey (CryptoKey), publicKeyRaw, chatId, silent, fromGrace }
 const connections = new Map();
+
+// Возвращает только соединения текущего чата (по chatId)
+function chatConnections() {
+  const cid = getChatId();
+  if (!cid) return [];
+  const result = [];
+  for (const [peerId, entry] of connections) {
+    if (entry.chatId === cid) result.push([peerId, entry]);
+  }
+  return result;
+}
+
+// Количество пиров в текущем чате
+function chatConnectionsCount() {
+  return chatConnections().length;
+}
 
 // Настройки
 let typewriterEnabled = true;
@@ -213,16 +229,13 @@ function getChatId() {
 }
 
 // Установить chatId при получении hello (когда известен никнейм собеседника)
-function updateChatId() {
+// connEntry — конкретное соединение, для которого вычисляем chatId
+function updateChatId(connEntry) {
   if (roomId) {
     currentChatId = roomId;
-  } else {
-    // Для прямого чата — сортированные никнеймы
-    const nicks = [myNickname];
-    for (const [, entry] of connections) {
-      if (entry.nickname) nicks.push(entry.nickname);
-    }
-    nicks.sort();
+  } else if (connEntry && connEntry.nickname) {
+    // Для прямого чата — только myNickname + никнейм конкретного пира
+    const nicks = [myNickname, connEntry.nickname].sort();
     currentChatId = 'dm:' + nicks.join(',');
   }
   dlog('chatId: ' + currentChatId);
@@ -498,19 +511,23 @@ let disconnectedClearTimer = null;
 
 // Полная очистка текущей сессии чата
 function teardownChatSession() {
-  // Очищаем старый список и собираем текущих пиров
+  // Очищаем старый список и собираем пиров ТЕКУЩЕГО чата
   disconnectedPeers.clear();
   if (disconnectedClearTimer) { clearTimeout(disconnectedClearTimer); disconnectedClearTimer = null; }
 
+  const cid = getChatId();
   const conns = [];
   for (const [peerId, entry] of connections) {
-    disconnectedPeers.add(peerId);
-    conns.push(entry);
+    // Закрываем только соединения текущего чата (или без chatId — legacy)
+    if (!cid || entry.chatId === cid || !entry.chatId) {
+      disconnectedPeers.add(peerId);
+      conns.push(entry);
+      connections.delete(peerId);
+    }
   }
 
-  // Очищаем Map и таймеры ДО закрытия соединений
+  // Очищаем таймеры ДО закрытия соединений
   // (close-обработчики PeerJS могут быть синхронными)
-  connections.clear();
   stopPingLoop();
 
   for (const [, info] of peerGraceTimers) {
@@ -642,15 +659,21 @@ function rejoinFromRoomCard(room) {
     if (alreadyConnected) {
       // Соединение уже есть — просто показываем чат
       currentChatId = room.chatId;
-      // Снимаем флаг silent с существующих соединений
+      // Снимаем флаг silent и привязываем к chatId
       for (const pid of room.peers) {
         const entry = connections.get(pid);
-        if (entry) entry.silent = false;
+        if (entry) {
+          entry.silent = false;
+          entry.chatId = room.chatId;
+          // Уведомляем пира что мы вошли в чат
+          sendToRaw(entry.conn, { type: 'chat-active' });
+        }
       }
       showChat();
       setChatInputEnabled(true);
       loadChatHistory();
-      setStatus('подключён — ' + connections.size + ' пир(ов)');
+      updateOnlineCount();
+      setStatus('подключён — ' + chatConnectionsCount() + ' пир(ов)');
       dlog('rooms: rejoin direct — reusing existing connection');
       return;
     }
@@ -992,9 +1015,9 @@ async function sendToEncrypted(conn, peerId, obj) {
   sendToRaw(conn, { type: 'encrypted', iv: encrypted.iv, data: encrypted.data });
 }
 
-// --- Broadcast с шифрованием (для каждого пира свой шифр) ---
+// --- Broadcast с шифрованием (только пиры текущего чата) ---
 async function broadcastEncrypted(obj) {
-  for (const [peerId, entry] of connections) {
+  for (const [peerId, entry] of chatConnections()) {
     if (entry.conn.open) {
       await sendToEncrypted(entry.conn, peerId, obj);
     }
@@ -1068,8 +1091,8 @@ function startPeerGrace(peerId, nickname, publicKeyRaw) {
       addSystemMessage(graceKey + ' отключился');
       updateOnlineCount();
       updateLockIcon();
-      // Если никого не осталось — блокируем input
-      if (connections.size === 0 && peerGraceTimers.size === 0) {
+      // Если никого не осталось в текущем чате — блокируем input
+      if (chatConnectionsCount() === 0 && peerGraceTimers.size === 0) {
         setChatInputEnabled(false);
         setStatus('ожидание собеседника...');
       }
@@ -1162,48 +1185,51 @@ function handleConnection(conn, graceInfo, isIncoming) {
 
     const inChat = !chatScreen.classList.contains('hidden');
 
-    // Если в direct-чате и это новый пир (не grace, не комната) — отклоняем
-    // (чтобы не смешивать чаты, переключение только через меню)
-    if (inChat && !wasInGrace && connections.size > 0 && !(isHost && roomId)) {
-      dlog('rejecting incoming: already in direct chat with another peer');
-      try { conn.close(); } catch (e) {}
-      return;
+    // Если в direct-чате и это новый входящий пир (не grace, не комната) —
+    // принимаем молча (чат появится в списке после hello), но не переключаем экран
+    const busyInChat = inChat && !wasInGrace && isIncoming && chatConnectionsCount() > 0 && !(isHost && roomId);
+    if (busyInChat) {
+      dlog('incoming while in chat: accepting silently (will appear in rooms list)');
     }
 
     // Определяем тип соединения (для логики grace при закрытии)
-    const isSilent = isIncoming && !inChat;  // молча принятое на главном экране
+    const isSilent = (isIncoming && !inChat) || busyInChat;  // молча принятое
     const isFromGrace = wasInGrace;           // созданное grace-реконнектом
+
+    // chatId: для активных соединений — текущий чат, для silent — установится в hello
+    const entryChatId = isSilent ? null : getChatId();
 
     connections.set(conn.peer, {
       conn: conn,
       nickname: (graceInfo && graceInfo.nickname) || null,
       sharedKey: null,
       publicKeyRaw: (graceInfo && graceInfo.publicKeyRaw) || null,
+      chatId: entryChatId,
       silent: isSilent,
       fromGrace: isFromGrace
     });
 
-    // Отправляем hello с публичным ключом
-    sendToRaw(conn, { type: 'hello', nickname: myNickname, publicKey: myPublicKeyJwk });
+    // Отправляем hello с публичным ключом + active: собеседник в этом чате?
+    sendToRaw(conn, { type: 'hello', nickname: myNickname, publicKey: myPublicKeyJwk, active: !isSilent });
 
-    // Хост отправляет список пиров
+    // Хост отправляет список пиров (только из этой комнаты)
     if (isHost) {
       const peerList = [];
-      for (const [peerId] of connections) {
-        if (peerId !== conn.peer) peerList.push(peerId);
+      for (const [peerId, e] of connections) {
+        if (peerId !== conn.peer && e.chatId === getChatId()) peerList.push(peerId);
       }
       if (peerList.length > 0) {
         sendToRaw(conn, { type: 'peers', list: peerList });
       }
     }
 
-    if (inChat) {
-      // Уже в этом чате (user-initiated) — разблокируем input
-      setChatInputEnabled(true);
+    if (inChat && !busyInChat) {
+      // Уже в этом чате (grace reconnect) — input разблокируется в hello
     } else if (!isIncoming) {
-      // Исходящее соединение (user-initiated) — показываем чат
+      // Исходящее соединение — показываем чат, но input заблокирован до hello
       showChat();
-      setChatInputEnabled(true);
+      setChatInputEnabled(false);
+      setStatus('ожидание ответа...');
     } else {
       // Входящее соединение на главном экране — принимаем молча
       dlog('incoming on main screen: accepted silently');
@@ -1211,7 +1237,7 @@ function handleConnection(conn, graceInfo, isIncoming) {
     startPingLoop();
     updateOnlineCount();
     if (!isSilent) {
-      setStatus('подключён — ' + connections.size + ' пир(ов)');
+      setStatus('подключён — ' + chatConnectionsCount() + ' пир(ов)');
     }
   });
 
@@ -1224,8 +1250,9 @@ function handleConnection(conn, graceInfo, isIncoming) {
     }
 
     if (!parsed) {
-      // Обычный текст (не JSON)
+      // Обычный текст (не JSON) — только от пиров текущего чата
       const entry = connections.get(conn.peer);
+      if (entry && entry.silent) return;
       const author = (entry && entry.nickname) || conn.peer;
       addMessage(author, raw);
       playNotificationSound();
@@ -1272,29 +1299,72 @@ function handleConnection(conn, graceInfo, isIncoming) {
         if (parsed.publicKey) {
           try {
             entry.sharedKey = await deriveSharedKey(parsed.publicKey);
-            const fp = getFingerprint(parsed.publicKey);
-            if (wasInGrace) {
-              addSystemMessage(parsed.nickname + ' переподключился 🔒 [' + fp + ']');
-            } else {
-              addSystemMessage(parsed.nickname + ' подключился 🔒 [' + fp + ']');
-            }
-            updateLockIcon();
-          } catch (e) {
-            addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
+          } catch (e) { /* без шифрования */ }
+        }
+
+        // Если соединение silent (принято в фоне) — сохраняем как отдельный чат,
+        // но не трогаем текущий chatId, историю и UI
+        if (entry.silent) {
+          const silentChatId = 'dm:' + [myNickname, parsed.nickname].sort().join(',');
+          entry.chatId = silentChatId;  // привязываем соединение к чату
+          saveRoom(silentChatId, {
+            name: '@ ' + parsed.nickname,
+            mode: 'direct',
+            isHost: false,
+            roomId: null,
+            peers: [conn.peer],
+            lastTs: Date.now()
+          });
+          renderRoomsList();
+          dlog('silent hello from ' + parsed.nickname + ' → saved room ' + silentChatId);
+          updateOnlineCount();
+          return;
+        }
+
+        // Системное сообщение о подключении (только для активного чата)
+        if (parsed.publicKey && entry.sharedKey) {
+          const fp = getFingerprint(parsed.publicKey);
+          if (wasInGrace) {
+            addSystemMessage(parsed.nickname + ' переподключился 🔒 [' + fp + ']');
+          } else {
+            addSystemMessage(parsed.nickname + ' подключился 🔒 [' + fp + ']');
           }
+          updateLockIcon();
         } else {
           addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
         }
       }
-      updateChatId();
+
+      updateChatId(entry);
+      // Привязываем соединение к chatId
+      if (entry) entry.chatId = getChatId();
       loadChatHistory();
       updateOnlineCount();
 
-      // Сохраняем чат в список
+      // Обновляем заголовок чата (после hello chatId стабилен)
+      const inChatNow = !chatScreen.classList.contains('hidden');
+      if (inChatNow && currentChatId && currentChatId.startsWith('dm:')) {
+        const nicks = currentChatId.replace('dm:', '').split(',');
+        const other = nicks.find(n => n !== myNickname) || 'direct';
+        roomIdDisplay.textContent = '@ ' + other;
+      }
+
+      // Если собеседник active — разблокируем input, иначе ожидание
+      if (parsed.active === false) {
+        setChatInputEnabled(false);
+        setStatus('собеседник не в чате...');
+      } else {
+        setChatInputEnabled(true);
+        setStatus('подключён — ' + chatConnectionsCount() + ' пир(ов)');
+      }
+
+      // Сохраняем чат в список — только пиры ЭТОГО чата
       const cid = getChatId();
       if (cid) {
         const peersList = [];
-        for (const [pid] of connections) peersList.push(pid);
+        for (const [pid, e] of connections) {
+          if (e.chatId === cid) peersList.push(pid);
+        }
         saveRoom(cid, {
           name: roomId ? '# ' + roomId : '@ ' + parsed.nickname,
           mode: roomId ? 'room' : 'direct',
@@ -1307,6 +1377,19 @@ function handleConnection(conn, graceInfo, isIncoming) {
         if (chatScreen.classList.contains('hidden')) {
           renderRoomsList();
         }
+      }
+      return;
+    }
+
+    // Собеседник вошёл в чат — разблокируем input
+    if (parsed.type === 'chat-active') {
+      const entry = connections.get(conn.peer);
+      const inChatNow = !chatScreen.classList.contains('hidden');
+      if (entry && inChatNow && entry.chatId === getChatId()) {
+        setChatInputEnabled(true);
+        setStatus('подключён — ' + chatConnectionsCount() + ' пир(ов)');
+        const name = entry.nickname || conn.peer;
+        addSystemMessage(name + ' вошёл в чат');
       }
       return;
     }
@@ -1370,8 +1453,9 @@ function handleConnection(conn, graceInfo, isIncoming) {
       updateLockIcon();
     }
 
-    if (connections.size > 0) {
-      setStatus('подключён — ' + connections.size + ' пир(ов)');
+    const cc = chatConnectionsCount();
+    if (cc > 0) {
+      setStatus('подключён — ' + cc + ' пир(ов)');
     } else if (peerGraceTimers.size > 0) {
       setStatus('переподключение...');
     } else {
@@ -1389,6 +1473,10 @@ function handleConnection(conn, graceInfo, isIncoming) {
 
 // --- Обработка расшифрованного (или нешифрованного) сообщения ---
 async function handleDecryptedMessage(conn, parsed) {
+  // Игнорируем сообщения от пиров, не принадлежащих текущему чату
+  const senderEntry = connections.get(conn.peer);
+  if (senderEntry && senderEntry.silent) return;
+
   if (parsed.type === 'msg') {
     addMessage(parsed.nickname, parsed.text);
     playNotificationSound();
@@ -1439,8 +1527,9 @@ async function handleDecryptedMessage(conn, parsed) {
 // --- Иконка замка ---
 function updateLockIcon() {
   if (!lockIcon) return;
-  let allEncrypted = connections.size > 0;
-  for (const [, entry] of connections) {
+  const cc = chatConnections();
+  let allEncrypted = cc.length > 0;
+  for (const [, entry] of cc) {
     if (!entry.sharedKey) {
       allEncrypted = false;
       break;
@@ -1450,7 +1539,7 @@ function updateLockIcon() {
     lockIcon.textContent = '🔒';
     lockIcon.title = 'E2E зашифровано (AES-256-GCM)';
     lockIcon.className = 'lock-on';
-  } else if (connections.size > 0) {
+  } else if (cc.length > 0) {
     lockIcon.textContent = '🔓';
     lockIcon.title = 'Частично зашифровано';
     lockIcon.className = 'lock-partial';
@@ -1484,7 +1573,7 @@ function clearTypingTimer(peerId) {
 
 let typingTimeout = null;
 function onTyping() {
-  if (connections.size === 0) return;
+  if (chatConnectionsCount() === 0) return;
   if (typingTimeout) return;
   broadcastEncrypted({ type: 'typing', nickname: myNickname });
   typingTimeout = setTimeout(() => { typingTimeout = null; }, 1000);
@@ -1666,7 +1755,7 @@ function formatDuration(seconds) {
 
 // --- Счётчик онлайн ---
 function updateOnlineCount() {
-  const connected = connections.size;
+  const connected = chatConnectionsCount();
   const inGrace = peerGraceTimers.size;
   const total = connected + 1;
   if (connected === 0 && inGrace === 0) {
@@ -1681,7 +1770,7 @@ function updateOnlineCount() {
 // --- Отправка сообщения ---
 function sendMessage() {
   const text = msgInput.value.trim();
-  if (!text || connections.size === 0) return;
+  if (!text || chatConnectionsCount() === 0) return;
   broadcastEncrypted({ type: 'msg', nickname: myNickname, text: text });
   addMessage(myNickname, text, true);
   msgInput.value = '';
@@ -1761,7 +1850,7 @@ function addSystemMessage(text, saveToDB = true) {
 
 // --- Передача файлов ---
 function sendFile(file) {
-  if (!file || connections.size === 0) return;
+  if (!file || chatConnectionsCount() === 0) return;
 
   if (file.size > FILE_MAX_SIZE) {
     addSystemMessage('файл слишком большой (макс. 50 МБ)');
@@ -2064,7 +2153,7 @@ typewriterToggle.classList.toggle('active', typewriterEnabled);
 if (lockIcon) {
   lockIcon.addEventListener('click', () => {
     let info = 'Мой fingerprint: ' + getFingerprint(myPublicKeyJwk) + '\n';
-    for (const [, entry] of connections) {
+    for (const [, entry] of chatConnections()) {
       if (entry.nickname && entry.publicKeyRaw) {
         info += entry.nickname + ': ' + getFingerprint(entry.publicKeyRaw);
       }
