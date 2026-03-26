@@ -1196,6 +1196,14 @@ function handleConnection(conn, graceInfo, isIncoming) {
     const isSilent = (isIncoming && !inChat) || busyInChat;  // молча принятое
     const isFromGrace = wasInGrace;           // созданное grace-реконнектом
 
+    // Дубликат: если уже есть не-silent соединение к этому пиру — закрываем дубль
+    const existing = connections.get(conn.peer);
+    if (existing && !existing.silent && isSilent) {
+      dlog('duplicate conn from ' + conn.peer + ': keeping active, closing silent duplicate');
+      try { conn.close(); } catch (e) {}
+      return;
+    }
+
     // chatId: для активных соединений — текущий чат, для silent — установится в hello
     const entryChatId = isSilent ? null : getChatId();
 
@@ -1321,18 +1329,25 @@ function handleConnection(conn, graceInfo, isIncoming) {
           return;
         }
 
-        // Системное сообщение о подключении (только для активного чата)
-        if (parsed.publicKey && entry.sharedKey) {
-          const fp = getFingerprint(parsed.publicKey);
-          if (wasInGrace) {
-            addSystemMessage(parsed.nickname + ' переподключился 🔒 [' + fp + ']');
+        // Системное сообщение о подключении (дедупликация — 3 сек)
+        const now = Date.now();
+        const dedup = handleConnection._lastHello || (handleConnection._lastHello = {});
+        const isDuplicate = dedup[parsed.nickname] && (now - dedup[parsed.nickname] < 3000);
+        dedup[parsed.nickname] = now;
+
+        if (!isDuplicate) {
+          if (parsed.publicKey && entry.sharedKey) {
+            const fp = getFingerprint(parsed.publicKey);
+            if (wasInGrace) {
+              addSystemMessage(parsed.nickname + ' переподключился 🔒 [' + fp + ']');
+            } else {
+              addSystemMessage(parsed.nickname + ' подключился 🔒 [' + fp + ']');
+            }
           } else {
-            addSystemMessage(parsed.nickname + ' подключился 🔒 [' + fp + ']');
+            addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
           }
-          updateLockIcon();
-        } else {
-          addSystemMessage(parsed.nickname + (wasInGrace ? ' переподключился' : ' подключился') + ' (без шифрования)');
         }
+        updateLockIcon();
       }
 
       updateChatId(entry);
@@ -1358,6 +1373,11 @@ function handleConnection(conn, graceInfo, isIncoming) {
         setStatus('подключён — ' + chatConnectionsCount() + ' пир(ов)');
       }
 
+      // Если мы в этом чате — отвечаем chat-active (решает race при одновременном входе)
+      if (inChatNow && entry && entry.chatId === getChatId()) {
+        sendToRaw(conn, { type: 'chat-active' });
+      }
+
       // Сохраняем чат в список — только пиры ЭТОГО чата
       const cid = getChatId();
       if (cid) {
@@ -1381,15 +1401,13 @@ function handleConnection(conn, graceInfo, isIncoming) {
       return;
     }
 
-    // Собеседник вошёл в чат — разблокируем input
+    // Собеседник вошёл в чат — разблокируем input (без системного сообщения)
     if (parsed.type === 'chat-active') {
       const entry = connections.get(conn.peer);
       const inChatNow = !chatScreen.classList.contains('hidden');
       if (entry && inChatNow && entry.chatId === getChatId()) {
         setChatInputEnabled(true);
         setStatus('подключён — ' + chatConnectionsCount() + ' пир(ов)');
-        const name = entry.nickname || conn.peer;
-        addSystemMessage(name + ' вошёл в чат');
       }
       return;
     }
