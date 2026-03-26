@@ -324,6 +324,54 @@ function loadHistory(chatId) {
   });
 }
 
+// Получить timestamp последнего сообщения в чате
+function getLastTimestamp(chatId) {
+  if (!db) return Promise.resolve(0);
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('messages', 'readonly');
+      const store = tx.objectStore('messages');
+      const index = store.index('chatId');
+      const req = index.getAll(chatId);
+      req.onsuccess = () => {
+        const msgs = req.result || [];
+        if (msgs.length === 0) return resolve(0);
+        let maxTs = 0;
+        for (const m of msgs) {
+          if (m.timestamp > maxTs) maxTs = m.timestamp;
+        }
+        resolve(maxTs);
+      };
+      req.onerror = () => resolve(0);
+    } catch (e) {
+      resolve(0);
+    }
+  });
+}
+
+// Получить сообщения новее sinceTs (макс limit)
+function getMessagesSince(chatId, sinceTs, limit = 100) {
+  if (!db) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('messages', 'readonly');
+      const store = tx.objectStore('messages');
+      const index = store.index('chatId');
+      const req = index.getAll(chatId);
+      req.onsuccess = () => {
+        const msgs = (req.result || [])
+          .filter(m => m.timestamp > sinceTs && (m.type === 'msg' || m.type === 'system'))
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(0, limit);
+        resolve(msgs);
+      };
+      req.onerror = () => resolve([]);
+    } catch (e) {
+      resolve([]);
+    }
+  });
+}
+
 // Отрисовка истории из IndexedDB (без typewriter, без звука)
 function renderHistory(messages) {
   for (const msg of messages) {
@@ -1389,6 +1437,7 @@ function handleConnection(conn, graceInfo, isIncoming) {
     // Нешифрованные служебные сообщения (hello, peers)
     if (parsed.type === 'hello') {
       const entry = connections.get(conn.peer);
+      let syncTsPromise = null;
       if (entry) {
         entry.nickname = parsed.nickname;
         entry.publicKeyRaw = parsed.publicKey;
@@ -1436,6 +1485,11 @@ function handleConnection(conn, graceInfo, isIncoming) {
           return;
         }
 
+        // Запоминаем lastTimestamp ДО добавления системных сообщений
+        // (иначе свежее "подключился" сдвинет timestamp вперёд и sync пропустит старые сообщения)
+        const preSyncChatId = getChatId() || (roomId ? roomId : ('dm:' + [myNickname, parsed.nickname].sort().join(',')));
+        syncTsPromise = getLastTimestamp(preSyncChatId);
+
         // Системное сообщение о подключении (дедупликация — 3 сек)
         const now = Date.now();
         const dedup = handleConnection._lastHello || (handleConnection._lastHello = {});
@@ -1462,6 +1516,19 @@ function handleConnection(conn, graceInfo, isIncoming) {
       if (entry) entry.chatId = getChatId();
       loadChatHistory();
       updateOnlineCount();
+
+      // Синхронизация истории: используем timestamp, захваченный ДО системных сообщений
+      const syncChatId = getChatId();
+      if (syncChatId && entry && entry.sharedKey && syncTsPromise) {
+        syncTsPromise.then(lastTs => {
+          sendToEncrypted(conn, conn.peer, {
+            type: 'sync-request',
+            chatId: syncChatId,
+            lastTimestamp: lastTs
+          });
+          dlog('sync: отправлен sync-request для ' + syncChatId + ' (после ts=' + lastTs + ')');
+        });
+      }
 
       // Обновляем заголовок чата (после hello chatId стабилен)
       const inChatNow = !chatScreen.classList.contains('hidden');
@@ -1645,6 +1712,60 @@ async function handleDecryptedMessage(conn, parsed) {
     finalizeFileReceive(transfer);
     incomingFiles.delete(parsed.transferId);
     playNotificationSound();
+    return;
+  }
+
+  // --- Синхронизация истории ---
+  if (parsed.type === 'sync-request') {
+    const reqChatId = getChatId(); // используем свой chatId, не доверяем пиру
+    if (!reqChatId) return;
+    const sinceTs = parsed.lastTimestamp || 0;
+    dlog('sync: получен sync-request от ' + conn.peer + ' (sinceTs=' + sinceTs + ')');
+    getMessagesSince(reqChatId, sinceTs, 100).then(msgs => {
+      if (msgs.length > 0) {
+        sendToEncrypted(conn, conn.peer, {
+          type: 'sync-response',
+          chatId: reqChatId,
+          messages: msgs
+        });
+        dlog('sync: отправлен sync-response: ' + msgs.length + ' сообщений');
+      }
+    });
+    return;
+  }
+
+  if (parsed.type === 'sync-response') {
+    const myChatId = getChatId();
+    if (!myChatId) return;
+    const msgs = parsed.messages;
+    if (!Array.isArray(msgs) || msgs.length === 0) return;
+    dlog('sync: получен sync-response: ' + msgs.length + ' сообщений');
+
+    // Загружаем существующие msgId для дедупликации
+    loadHistory(myChatId).then(existing => {
+      const existingIds = new Set(existing.map(m => m.msgId));
+      let added = 0;
+
+      for (const msg of msgs) {
+        // Принимаем только msg и system
+        if (msg.type !== 'msg' && msg.type !== 'system') continue;
+        // Дедупликация
+        if (msg.msgId && existingIds.has(msg.msgId)) continue;
+        // Привязываем к нашему chatId (не доверяем пиру)
+        msg.chatId = myChatId;
+        saveMessageToDB(msg);
+        added++;
+      }
+
+      if (added > 0) {
+        dlog('sync: добавлено ' + added + ' новых сообщений', 'ok');
+        addSystemMessage('синхронизировано: +' + added + ' сообщений');
+        // Перерисовываем историю
+        messagesEl.innerHTML = '';
+        historyLoaded = false;
+        loadChatHistory();
+      }
+    });
     return;
   }
 }
