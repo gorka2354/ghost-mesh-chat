@@ -632,6 +632,30 @@ function formatRoomTime(ts) {
 }
 
 function rejoinFromRoomCard(room) {
+  // Проверяем: есть ли уже активное соединение с пиром из этого чата?
+  // (молча принятое на главном экране)
+  if (room.mode === 'direct' && room.peers && room.peers.length > 0) {
+    const alreadyConnected = room.peers.some(pid => {
+      const entry = connections.get(pid);
+      return entry && entry.conn.open;
+    });
+    if (alreadyConnected) {
+      // Соединение уже есть — просто показываем чат
+      currentChatId = room.chatId;
+      // Снимаем флаг silent с существующих соединений
+      for (const pid of room.peers) {
+        const entry = connections.get(pid);
+        if (entry) entry.silent = false;
+      }
+      showChat();
+      setChatInputEnabled(true);
+      loadChatHistory();
+      setStatus('подключён — ' + connections.size + ' пир(ов)');
+      dlog('rooms: rejoin direct — reusing existing connection');
+      return;
+    }
+  }
+
   teardownChatSession();
 
   // Устанавливаем контекст чата
@@ -875,7 +899,7 @@ function initPeer(peerId, onOpen) {
   thisPeer.on('connection', (incoming) => {
     if (peer !== thisPeer) return;
     dlog('incoming connection from ' + incoming.peer);
-    handleConnection(incoming);
+    handleConnection(incoming, null, true);
   });
 
   thisPeer.on('error', (err) => {
@@ -1111,7 +1135,7 @@ function checkAllConnections() {
 }
 
 // --- Обработка соединения ---
-function handleConnection(conn, graceInfo) {
+function handleConnection(conn, graceInfo, isIncoming) {
   const ownerPeer = peer; // Запоминаем текущий экземпляр peer
 
   conn.on('open', () => {
@@ -1136,13 +1160,28 @@ function handleConnection(conn, graceInfo) {
       dlog('peer reconnected: ' + conn.peer + ' (из грейса)', 'ok');
     }
 
-    // Если уже есть соединения в direct-чате и это новый пир — переключаемся
-    if (!wasInGrace && connections.size > 0 && !(isHost && roomId)) {
-      dlog('new peer in direct chat: teardown old session, switching');
-      teardownChatSession();
+    const inChat = !chatScreen.classList.contains('hidden');
+
+    // Если в direct-чате и это новый пир (не grace, не комната) — отклоняем
+    // (чтобы не смешивать чаты, переключение только через меню)
+    if (inChat && !wasInGrace && connections.size > 0 && !(isHost && roomId)) {
+      dlog('rejecting incoming: already in direct chat with another peer');
+      try { conn.close(); } catch (e) {}
+      return;
     }
 
-    connections.set(conn.peer, { conn: conn, nickname: (graceInfo && graceInfo.nickname) || null, sharedKey: null, publicKeyRaw: (graceInfo && graceInfo.publicKeyRaw) || null });
+    // Определяем тип соединения (для логики grace при закрытии)
+    const isSilent = isIncoming && !inChat;  // молча принятое на главном экране
+    const isFromGrace = wasInGrace;           // созданное grace-реконнектом
+
+    connections.set(conn.peer, {
+      conn: conn,
+      nickname: (graceInfo && graceInfo.nickname) || null,
+      sharedKey: null,
+      publicKeyRaw: (graceInfo && graceInfo.publicKeyRaw) || null,
+      silent: isSilent,
+      fromGrace: isFromGrace
+    });
 
     // Отправляем hello с публичным ключом
     sendToRaw(conn, { type: 'hello', nickname: myNickname, publicKey: myPublicKeyJwk });
@@ -1158,11 +1197,22 @@ function handleConnection(conn, graceInfo) {
       }
     }
 
-    showChat();
-    setChatInputEnabled(true);
+    if (inChat) {
+      // Уже в этом чате (user-initiated) — разблокируем input
+      setChatInputEnabled(true);
+    } else if (!isIncoming) {
+      // Исходящее соединение (user-initiated) — показываем чат
+      showChat();
+      setChatInputEnabled(true);
+    } else {
+      // Входящее соединение на главном экране — принимаем молча
+      dlog('incoming on main screen: accepted silently');
+    }
     startPingLoop();
     updateOnlineCount();
-    setStatus('подключён — ' + connections.size + ' пир(ов)');
+    if (!isSilent) {
+      setStatus('подключён — ' + connections.size + ' пир(ов)');
+    }
   });
 
   conn.on('data', async (raw) => {
@@ -1253,6 +1303,10 @@ function handleConnection(conn, graceInfo) {
           peers: peersList,
           lastTs: Date.now()
         });
+        // Если на главном экране — обновляем список чатов
+        if (chatScreen.classList.contains('hidden')) {
+          renderRoomsList();
+        }
       }
       return;
     }
@@ -1303,6 +1357,9 @@ function handleConnection(conn, graceInfo) {
     if (stillConnected) {
       // Тот же никнейм подключён через другой peer ID — молча убираем старое
       dlog('stale conn closed: ' + conn.peer + ' (nickname ' + name + ' still connected)', 'info');
+    } else if (entry.silent || entry.fromGrace) {
+      // Молча принятое или grace-реконнект — НЕ запускаем grace (избегаем loop)
+      dlog('no-grace close: ' + name + ' (silent=' + !!entry.silent + ' fromGrace=' + !!entry.fromGrace + ')');
     } else if (peer && peer.open && !peerGraceTimers.has(graceKey)) {
       // Грейс-период — пробуем реконнект
       startPeerGrace(conn.peer, name, pubKey);
