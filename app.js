@@ -170,6 +170,13 @@ debugToggle.addEventListener('click', () => {
     dlog('IndexedDB unavailable, history disabled', 'warn');
   }
 
+  // Запрашиваем разрешение на уведомления (ненавязчиво, только если ещё не решено)
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then(p => {
+      dlog('notifications: ' + p, p === 'granted' ? 'ok' : 'warn');
+    });
+  }
+
   const savedProfile = await loadProfileFromDB();
   if (savedProfile) {
     if (savedProfile.nickname) {

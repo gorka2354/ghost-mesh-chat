@@ -42,6 +42,21 @@ function generateAvatar(nickname, avatarData) {
   return canvas.toDataURL();
 }
 
+// --- Browser Notifications ---
+function showBrowserNotification(author, text) {
+  if (!document.hidden) return; // вкладка активна — не нужно
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const n = new Notification(author, {
+    body: text,
+    icon: './icon.svg',
+    tag: 'ghost-mesh-msg' // заменяет предыдущее уведомление, не спамит
+  });
+  n.onclick = () => {
+    window.focus();
+    n.close();
+  };
+}
+
 // --- 8-битный звук уведомления ---
 let audioCtx = null;
 

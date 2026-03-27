@@ -607,6 +607,7 @@ function handleConnection(conn, graceInfo, isIncoming) {
       const author = (entry && entry.nickname) || conn.peer;
       addMessage(author, raw);
       playNotificationSound();
+      showBrowserNotification(author, raw);
       return;
     }
 
@@ -834,6 +835,7 @@ async function handleDecryptedMessage(conn, parsed) {
   if (parsed.type === 'msg') {
     addMessage(parsed.nickname, parsed.text);
     playNotificationSound();
+    showBrowserNotification(parsed.nickname, parsed.text);
     return;
   }
 
@@ -845,6 +847,7 @@ async function handleDecryptedMessage(conn, parsed) {
   if (parsed.type === 'voice') {
     addVoiceMessage(parsed.nickname, parsed.audio, parsed.duration, false, parsed.mimeType);
     playNotificationSound();
+    showBrowserNotification(parsed.nickname, '🎤 голосовое сообщение');
     return;
   }
 
@@ -874,6 +877,7 @@ async function handleDecryptedMessage(conn, parsed) {
     finalizeFileReceive(transfer);
     incomingFiles.delete(parsed.transferId);
     playNotificationSound();
+    showBrowserNotification(transfer.meta.nickname, '📎 ' + transfer.meta.fileName);
     return;
   }
 
